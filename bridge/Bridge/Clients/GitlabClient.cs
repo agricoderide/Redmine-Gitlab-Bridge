@@ -67,4 +67,14 @@ public sealed class GitLabClient
         var id = doc.RootElement.GetProperty("id").GetInt64();
         return (true, id, "ok");
     }
+
+    // List GitLab issues for a project (all states)
+    public async Task<IReadOnlyList<JsonElement>> GetProjectIssuesAsync(long projectId, CancellationToken ct = default)
+    {
+        var resp = await _http.GetAsync($"projects/{projectId}/issues?per_page=100&state=all", ct);
+        resp.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) return Array.Empty<JsonElement>();
+        return doc.RootElement.EnumerateArray().Select(e => e.Clone()).ToList();
+    }
 }

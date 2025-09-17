@@ -78,6 +78,8 @@ public sealed class Program
             await seeder.SeedAsync();
         }
 
+        
+
         // Health
         app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 

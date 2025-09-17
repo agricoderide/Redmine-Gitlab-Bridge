@@ -35,8 +35,8 @@ public sealed class RedmineClient
     // Services/RedmineClient.cs
     public async Task<IReadOnlyList<JsonElement>> GetProjectsAsync(CancellationToken ct = default)
     {
-        // include=custom_fields to bring your "GitLab Projects" field
-        var resp = await _http.GetAsync("projects.json", ct);
+        // include=custom_fields so the list has the GitLab link CF
+        var resp = await _http.GetAsync("projects.json?include=custom_fields", ct);
         resp.EnsureSuccessStatusCode();
 
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
@@ -46,27 +46,25 @@ public sealed class RedmineClient
         return arr.EnumerateArray().Select(e => e.Clone()).ToList();
     }
 
+    // Kept for compatibility if ever needed to filter, but not used by seeder anymore
     public async Task<IReadOnlyList<JsonElement>> GetProjectsListAsync(CancellationToken ct = default)
     {
-        var all = new List<JsonElement>();
-        int limit = 100, offset = 0;
+        return await GetProjectsAsync(ct);
+    }
 
-        while (true)
-        {
-            var resp = await _http.GetAsync($"projects.json?limit={limit}&offset={offset}", ct);
-            resp.EnsureSuccessStatusCode();
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+    // List issues for a given Redmine project by id or identifier
+    public async Task<IReadOnlyList<JsonElement>> GetProjectIssuesAsync(string projectIdentifierOrId, CancellationToken ct = default)
+    {
+        // include journals/relations not needed for association; fetch basic fields
+        // status_id=*, to retrieve open and closed issues
+        var url = $"issues.json?project_id={Uri.EscapeDataString(projectIdentifierOrId)}&status_id=*&limit=100";
+        var resp = await _http.GetAsync(url, ct);
+        resp.EnsureSuccessStatusCode();
 
-            var arr = doc.RootElement.GetProperty("projects");
-            // Clone each element before the document is disposed
-            foreach (var p in arr.EnumerateArray()) all.Add(p.Clone());
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        if (!doc.RootElement.TryGetProperty("issues", out var arr)) return Array.Empty<JsonElement>();
 
-            int total = doc.RootElement.GetProperty("total_count").GetInt32();
-            offset += limit;
-            if (offset >= total) break;
-        }
-
-        return all;
+        return arr.EnumerateArray().Select(e => e.Clone()).ToList();
     }
 
     public async Task<JsonElement?> GetProjectDetailsAsync(string identifierOrId, CancellationToken ct = default)
