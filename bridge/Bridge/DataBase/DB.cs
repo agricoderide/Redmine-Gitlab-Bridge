@@ -16,26 +16,28 @@ public sealed class SyncDbContext : DbContext
     protected override void OnModelCreating(ModelBuilder b)
     {
         b.Entity<ProjectSync>()
-         .HasIndex(x => x.RedmineProjectId)
-         .IsUnique();
+            .HasIndex(x => x.RedmineProjectId).IsUnique();
 
-        // 1:1 ProjectSync ↔ GitLabProject (optional, but at most one)
         b.Entity<ProjectSync>()
-         .HasOne(p => p.GitLabProject)
-         .WithOne(g => g.ProjectSync)
-         .HasForeignKey<GitLabProject>(g => g.ProjectSyncId)
-         .OnDelete(DeleteBehavior.Cascade);
+            .HasOne(p => p.GitLabProject)
+            .WithOne(g => g.ProjectSync)
+            .HasForeignKey<GitLabProject>(g => g.ProjectSyncId)
+            .OnDelete(DeleteBehavior.Cascade);
 
-        // Ensure at most one GitLabProject per ProjectSync
-        b.Entity<GitLabProject>()
-         .HasIndex(g => g.ProjectSyncId)
-         .IsUnique();
-
-        // Issue mappings uniqueness
         b.Entity<IssueMapping>().HasIndex(i => i.RedmineIssueId).IsUnique();
         b.Entity<IssueMapping>().HasIndex(i => i.GitLabIssueId).IsUnique();
     }
+
+    // optional fallback for EF CLI if you drop the factory
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        if (!optionsBuilder.IsConfigured)
+        {
+            optionsBuilder.UseSqlite("Data Source=bridge.db");
+        }
+    }
 }
+
 
 public sealed class ProjectSync
 {

@@ -1,3 +1,6 @@
+// Bridge application startup: config binding, DI registrations,
+// HTTP resilience, EF Core, background workers, health, Swagger,
+// reverse-proxy headers, and minimal API endpoints.
 using System.Net;
 using System.Text.Json;
 using Bridge.Data;
@@ -15,16 +18,17 @@ public sealed class Program
 {
     public static async Task Main(string[] args)
     {
+        // Create the host builder (loads configuration, logging, etc.)
         var builder = WebApplication.CreateBuilder(args);
 
-        // Load appsettings.json + appsettings.{ENV}.json automatically
-        // ENV is from ASPNETCORE_ENVIRONMENT (Development/Production/etc.)
+        // Note: .NET automatically loads appsettings.json + appsettings.{ENV}.json
+        // where ENV is ASPNETCORE_ENVIRONMENT (Development/Production/etc.)
 
-        // Bind options
+        // Bind strongly-typed options from configuration for DI
         builder.Services.Configure<RedmineOptions>(builder.Configuration.GetSection(RedmineOptions.SectionName));
         builder.Services.Configure<GitLabOptions>(builder.Configuration.GetSection(GitLabOptions.SectionName));
 
-        // Polly retry with jitter
+        // Resilience policy for outbound HTTP calls (exponential backoff + jitter)
         static IAsyncPolicy<HttpResponseMessage> RetryPolicy() =>
             HttpPolicyExtensions
                 .HandleTransientHttpError()
@@ -33,45 +37,50 @@ public sealed class Program
                     attempt => TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt))
                               + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 250)));
 
-        // Typed HTTP clients
+        // Typed HttpClients for external services, using the above retry policy
         builder.Services.AddHttpClient<RedmineClient>().AddPolicyHandler(RetryPolicy());
         builder.Services.AddHttpClient<GitLabClient>().AddPolicyHandler(RetryPolicy());
 
-        // after you configure options and HttpClients…
+        // Redmine polling configuration + background services
         builder.Services.Configure<RedminePollingOptions>(
             builder.Configuration.GetSection("Polling:Redmine"));
 
         builder.Services.AddSingleton<IRedminePoller, RedminePoller>();
         builder.Services.AddHostedService<RedminePollingWorker>();
 
-        // Health + Swagger
+        // Health checks and Swagger/OpenAPI generator
         builder.Services.AddHealthChecks().AddCheck("self", () => HealthCheckResult.Healthy());
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddSwaggerGen();
 
-        // Database
+        // Database (EF Core): configure SyncDbContext
         builder.Services.AddDbContext<SyncDbContext>(options =>
         {
             var conn = builder.Configuration.GetConnectionString("DefaultConnection")
                        ?? "Data Source=bridge.db"; // SQLite for dev
             options.UseSqlite(conn);
         });
-        // Seeder
+        // Database seeding util
         builder.Services.AddScoped<DbSeeder>();
+
+        
 
         var app = builder.Build();
 
         if (app.Environment.IsDevelopment())
         {
+            // Only expose Swagger UI in Development
             app.UseSwagger();
             app.UseSwaggerUI();
         }
 
+        // Respect proxy headers (X-Forwarded-For/Proto) when behind reverse proxies
         app.UseForwardedHeaders(new ForwardedHeadersOptions
         {
             ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
         });
 
+        // Run startup seeding inside a scope
         using (var scope = app.Services.CreateScope())
         {
             var seeder = scope.ServiceProvider.GetRequiredService<DbSeeder>();
@@ -97,6 +106,7 @@ public sealed class Program
 
 
 
+        // Background polling status snapshot
         app.MapGet("/dev/redmine/poll/status", () =>
         {
             return Results.Ok(new
@@ -110,6 +120,7 @@ public sealed class Program
         });
 
 
+        // Trigger a single poll cycle (manual)
         app.MapPost("/dev/redmine/poll-once", async (IRedminePoller poller, CancellationToken ct) =>
         {
             await poller.PollOnceAsync(ct);
@@ -122,7 +133,7 @@ public sealed class Program
             return ok ? Results.Ok(new { ok, msg }) : Results.Problem(msg, statusCode: 502);
         });
 
-        // GitLab webhook (checks X-Gitlab-Token)
+        // GitLab webhook (validates shared secret via X-Gitlab-Token)
         app.MapPost("/webhooks/gitlab", async (HttpRequest req, IConfiguration cfg) =>
         {
             var secret = cfg.GetSection(GitLabOptions.SectionName)["WebhookSecret"] ?? "";
