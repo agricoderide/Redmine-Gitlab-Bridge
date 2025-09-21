@@ -3,6 +3,7 @@ using System;
 using Bridge.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Bridge.Migrations
 {
     [DbContext(typeof(SyncDbContext))]
-    partial class SyncDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250918153508_Init_2")]
+    partial class Init_2
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.9");
@@ -79,32 +82,6 @@ namespace Bridge.Migrations
                     b.ToTable("IssueMappings");
                 });
 
-            modelBuilder.Entity("Bridge.Data.ProjectMembership", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("ProjectSyncId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Source")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UserId");
-
-                    b.HasIndex("ProjectSyncId", "UserId", "Source")
-                        .IsUnique();
-
-                    b.ToTable("ProjectMemberships");
-                });
-
             modelBuilder.Entity("Bridge.Data.ProjectSync", b =>
                 {
                     b.Property<int>("Id")
@@ -133,66 +110,6 @@ namespace Bridge.Migrations
                     b.ToTable("Projects");
                 });
 
-            modelBuilder.Entity("Bridge.Data.Tracker", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("RedmineTrackerId")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Name")
-                        .IsUnique();
-
-                    b.HasIndex("RedmineTrackerId")
-                        .IsUnique();
-
-                    b.ToTable("Trackers");
-                });
-
-            modelBuilder.Entity("Bridge.Data.User", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("DisplayName")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Email")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int?>("GitLabUserId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("GitLabUsername")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RedmineLogin")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int?>("RedmineUserId")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("GitLabUserId")
-                        .IsUnique();
-
-                    b.HasIndex("RedmineUserId")
-                        .IsUnique();
-
-                    b.ToTable("Users");
-                });
-
             modelBuilder.Entity("Bridge.Data.GitLabProject", b =>
                 {
                     b.HasOne("Bridge.Data.ProjectSync", "ProjectSync")
@@ -213,25 +130,6 @@ namespace Bridge.Migrations
                         .IsRequired();
 
                     b.Navigation("ProjectSync");
-                });
-
-            modelBuilder.Entity("Bridge.Data.ProjectMembership", b =>
-                {
-                    b.HasOne("Bridge.Data.ProjectSync", "ProjectSync")
-                        .WithMany()
-                        .HasForeignKey("ProjectSyncId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Bridge.Data.User", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("ProjectSync");
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("Bridge.Data.ProjectSync", b =>

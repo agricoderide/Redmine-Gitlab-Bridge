@@ -12,7 +12,7 @@ namespace Bridge.Services;
 public sealed class GitLabClient
 {
     private readonly HttpClient _http;
-    private readonly GitLabOptions _opt;
+    public readonly GitLabOptions _opt;
 
     public GitLabClient(HttpClient http, IOptions<GitLabOptions> opt)
     {
@@ -22,9 +22,20 @@ public sealed class GitLabClient
         _http.BaseAddress = new Uri(_opt.BaseUrl.TrimEnd('/') + "/api/v4/");
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-        if (!string.IsNullOrWhiteSpace(_opt.PrivateToken))
-            _http.DefaultRequestHeaders.Add("PRIVATE-TOKEN", _opt.PrivateToken);
+        if (string.IsNullOrWhiteSpace(_opt.PrivateToken))
+        {
+            throw new InvalidOperationException(
+                "GitLabClient requires a PrivateToken but none was provided. " +
+                "Set GitLab:PrivateToken in configuration."
+            );
+        }
+
+        _http.DefaultRequestHeaders.Add("PRIVATE-TOKEN", _opt.PrivateToken);
     }
+
+
+
+
 
     /// <summary>Quick connectivity check.</summary>
     public async Task<(bool ok, string message)> PingAsync(CancellationToken ct = default)
@@ -39,6 +50,11 @@ public sealed class GitLabClient
             : 0;
         return (true, $"OK. projects={arrLen}");
     }
+
+
+
+
+
 
     /// <summary>Resolve numeric GitLab project id from a path like "group/subgroup/repo".</summary>
     public async Task<(bool ok, long id, string message)> ResolveProjectIdAsync(
@@ -55,52 +71,72 @@ public sealed class GitLabClient
         return (true, id, "ok");
     }
 
-    /// <summary>
-    /// Convenience wrapper; same as ResolveProjectIdAsync but expresses intent.
-    /// </summary>
-    public Task<(bool ok, long id, string message)> EnsureProjectIdAsync(
-        string pathWithNamespace,
-        CancellationToken ct = default)
-        => ResolveProjectIdAsync(pathWithNamespace, ct);
 
-    /// <summary>List all issues (any state) for a project, shaped to IssueBasic.</summary>
-    public async Task<IReadOnlyList<IssueBasic>> GetProjectIssuesBasicAsync(
-        long projectId,
-        CancellationToken ct = default)
+
+    // in GitLabClient.cs
+
+    public async Task<IReadOnlyList<IssueBasic>> GetProjectIssuesBasicAsync(long projectId, CancellationToken ct = default)
     {
-        var resp = await _http.GetAsync($"projects/{projectId}/issues?per_page=100&state=all", ct);
+        var resp = await _http.GetAsync($"projects/{projectId}/issues?per_page=300&state=all", ct);
         resp.EnsureSuccessStatusCode();
 
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-        if (doc.RootElement.ValueKind != JsonValueKind.Array)
-            return Array.Empty<IssueBasic>();
+        if (doc.RootElement.ValueKind != JsonValueKind.Array) return Array.Empty<IssueBasic>();
 
         var list = new List<IssueBasic>(doc.RootElement.GetArrayLength());
         foreach (var e in doc.RootElement.EnumerateArray())
         {
             var iid = e.GetProperty("iid").GetInt64();
-            var title = TryGetString(e, "title") ?? "";
-            var desc = TryGetString(e, "description");
-            list.Add(new IssueBasic(RedmineId: null, GitLabIid: iid, Title: title, Description: desc));
+            var title = e.TryGetProperty("title", out var t) ? (t.GetString() ?? "") : "";
+            var desc = e.TryGetProperty("description", out var d) ? d.GetString() : null;
+
+            List<string>? labels = null;
+            if (e.TryGetProperty("labels", out var labs) && labs.ValueKind == JsonValueKind.Array)
+            {
+                labels = new List<string>(labs.GetArrayLength());
+                foreach (var l in labs.EnumerateArray())
+                    if (l.ValueKind == JsonValueKind.String) labels.Add(l.GetString()!);
+            }
+
+            list.Add(new IssueBasic(null, iid, title, desc, null, labels));
         }
         return list;
     }
 
-    /// <summary>Create a GitLab issue using IssueBasic (Title/Description). Returns new IID.</summary>
-    public async Task<(bool ok, long newGitLabIid, string message)> CreateIssueBasicAsync(
-        long projectId,
-        IssueBasic issue,
-        CancellationToken ct = default)
-    {
-        var (ok, msg, doc) = await CreateIssueAsync(projectId, issue.Title, issue.Description, labelsCsv: null, ct);
-        if (!ok || doc is null) return (false, 0, msg);
 
-        var iid = doc.RootElement.GetProperty("iid").GetInt64();
-        return (true, iid, "created");
+
+
+
+    // GitLabClient.cs
+    public async Task<IReadOnlyList<(int Id, string Name, string Username, string? Email)>> GetProjectMembersAsync(
+        long projectId, CancellationToken ct = default)
+    {
+        var resp = await _http.GetAsync($"projects/{projectId}/members/all?per_page=100", ct);
+        if (!resp.IsSuccessStatusCode) return Array.Empty<(int, string, string, string?)>();
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        if (doc.RootElement.ValueKind != JsonValueKind.Array) return Array.Empty<(int, string, string, string?)>();
+
+        var list = new List<(int, string, string, string?)>();
+        foreach (var u in doc.RootElement.EnumerateArray())
+        {
+            var id = u.TryGetProperty("id", out var idp) ? idp.GetInt32() : 0;
+            var name = u.TryGetProperty("name", out var np) ? (np.GetString() ?? "") : "";
+            var user = u.TryGetProperty("username", out var up) ? up.GetString() : "";
+            var mail = u.TryGetProperty("email", out var mp) ? mp.GetString() : null;
+            if (id != 0 && !string.IsNullOrEmpty(user))
+                list.Add((id, name, user!, mail));
+        }
+        return list;
     }
 
-    /// <summary>Low-level create issue (form-url-encoded) that mirrors GitLab docs.</summary>
-    public async Task<(bool ok, string message, JsonDocument? json)> CreateIssueAsync(
+
+
+    /// <summary>
+    /// Create a GitLab issue (Title/Description/Labels). 
+    /// Returns new IID if successful.
+    /// </summary>
+    public async Task<(bool ok, long newGitLabIid, string message)> CreateIssueAsync(
         long projectId,
         string title,
         string? description = null,
@@ -116,10 +152,14 @@ public sealed class GitLabClient
         var body = await resp.Content.ReadAsStringAsync(ct);
 
         if (!resp.IsSuccessStatusCode)
-            return (false, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {body}", null);
+            return (false, 0, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {body}");
 
-        return (true, "created", JsonDocument.Parse(body));
+        using var doc = JsonDocument.Parse(body);
+        var iid = doc.RootElement.GetProperty("iid").GetInt64();
+
+        return (true, iid, "created");
     }
+
 
     // -------------
     // Helpers

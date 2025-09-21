@@ -9,9 +9,14 @@ public sealed record ProjectLink(
     string? GitLabPathWithNs      // null if GitLabUrl is null
 );
 
+
 public sealed record IssueBasic(
-    int? RedmineId,               // Redmine: set; GitLab: null
-    long? GitLabIid,              // GitLab project-scoped IID; Redmine: null
+    int?  RedmineId,
+    long? GitLabIid,
     string Title,
-    string? Description
+    string? Description,
+    string? TrackerName = null,              // <- used by seeder to filter RM
+    IReadOnlyList<string>? Labels = null     // <- used by seeder to map GL -> RM tracker
 );
+
+
