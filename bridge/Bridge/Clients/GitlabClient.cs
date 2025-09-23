@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Bridge.Contracts;
 using Bridge.Infrastructure.Options;
 using Microsoft.Extensions.Options;
@@ -11,13 +12,18 @@ namespace Bridge.Services;
 /// </summary>
 public sealed class GitLabClient
 {
+    public record GlMember(int Id, string Username, string Name);
     private readonly HttpClient _http;
     public readonly GitLabOptions _opt;
 
-    public GitLabClient(HttpClient http, IOptions<GitLabOptions> opt)
+    private readonly TrackersKeys _trackers;
+
+    public GitLabClient(HttpClient http, IOptions<GitLabOptions> opt, IOptions<TrackersKeys> trackers)
     {
         _http = http;
         _opt = opt.Value;
+
+        _trackers = trackers.Value;
 
         _http.BaseAddress = new Uri(_opt.BaseUrl.TrimEnd('/') + "/api/v4/");
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -50,6 +56,10 @@ public sealed class GitLabClient
             : 0;
         return (true, $"OK. projects={arrLen}");
     }
+
+
+
+
 
 
 
@@ -90,15 +100,30 @@ public sealed class GitLabClient
             var title = e.TryGetProperty("title", out var t) ? (t.GetString() ?? "") : "";
             var desc = e.TryGetProperty("description", out var d) ? d.GetString() : null;
 
-            List<string>? labels = null;
+            bool hasTracker = false;
+
             if (e.TryGetProperty("labels", out var labs) && labs.ValueKind == JsonValueKind.Array)
             {
-                labels = new List<string>(labs.GetArrayLength());
+                var trackerSet = new HashSet<string>(_trackers, StringComparer.OrdinalIgnoreCase);
+
                 foreach (var l in labs.EnumerateArray())
-                    if (l.ValueKind == JsonValueKind.String) labels.Add(l.GetString()!);
+                {
+                    if (l.ValueKind == JsonValueKind.String)
+                    {
+                        var val = l.GetString();
+                        if (!string.IsNullOrWhiteSpace(val) && trackerSet.Contains(val))
+                        {
+                            hasTracker = true;
+                            break; // one match is enough
+                        }
+                    }
+                }
             }
 
-            list.Add(new IssueBasic(null, iid, title, desc, null, labels));
+            if (hasTracker)
+            {
+                list.Add(new IssueBasic(null, iid, title, desc));
+            }
         }
         return list;
     }
@@ -107,28 +132,6 @@ public sealed class GitLabClient
 
 
 
-    // GitLabClient.cs
-    public async Task<IReadOnlyList<(int Id, string Name, string Username, string? Email)>> GetProjectMembersAsync(
-        long projectId, CancellationToken ct = default)
-    {
-        var resp = await _http.GetAsync($"projects/{projectId}/members/all?per_page=100", ct);
-        if (!resp.IsSuccessStatusCode) return Array.Empty<(int, string, string, string?)>();
-
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-        if (doc.RootElement.ValueKind != JsonValueKind.Array) return Array.Empty<(int, string, string, string?)>();
-
-        var list = new List<(int, string, string, string?)>();
-        foreach (var u in doc.RootElement.EnumerateArray())
-        {
-            var id = u.TryGetProperty("id", out var idp) ? idp.GetInt32() : 0;
-            var name = u.TryGetProperty("name", out var np) ? (np.GetString() ?? "") : "";
-            var user = u.TryGetProperty("username", out var up) ? up.GetString() : "";
-            var mail = u.TryGetProperty("email", out var mp) ? mp.GetString() : null;
-            if (id != 0 && !string.IsNullOrEmpty(user))
-                list.Add((id, name, user!, mail));
-        }
-        return list;
-    }
 
 
 
@@ -140,12 +143,10 @@ public sealed class GitLabClient
         long projectId,
         string title,
         string? description = null,
-        string? labelsCsv = null,
         CancellationToken ct = default)
     {
         var payload = new Dictionary<string, string> { ["title"] = title };
         if (!string.IsNullOrWhiteSpace(description)) payload["description"] = description;
-        if (!string.IsNullOrWhiteSpace(labelsCsv)) payload["labels"] = labelsCsv;
 
         using var content = new FormUrlEncodedContent(payload);
         var resp = await _http.PostAsync($"projects/{projectId}/issues", content, ct);
@@ -161,9 +162,41 @@ public sealed class GitLabClient
     }
 
 
+
+    // GitLab: project members (includes inherited members)
+    public async Task<List<GlMember>> GetGitLabProjectMembersAsync(int projectId, CancellationToken ct = default)
+    {
+        var all = new List<GlMember>();
+        for (int page = 1; ; page++)
+        {
+            var resp = await _http.GetAsync($"/api/v4/projects/{projectId}/members/all?per_page=100&page={page}", ct);
+            if (!resp.IsSuccessStatusCode) throw new HttpRequestException($"{(int)resp.StatusCode} {resp.ReasonPhrase}");
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            var arr = doc.RootElement.EnumerateArray().ToList();
+            foreach (var m in arr)
+            {
+                var id = m.GetProperty("id").GetInt32();
+                var user = m.GetProperty("username").GetString() ?? "";
+                var name = m.GetProperty("name").GetString() ?? "";
+
+                if (IsBotUsername(user)) continue;    // ← skip project/group bots
+
+                all.Add(new GlMember(id, user, name));
+            }
+
+            if (arr.Count < 100) break;
+        }
+        return all;
+    }
     // -------------
     // Helpers
     // -------------
     private static string? TryGetString(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) ? v.GetString() : null;
+
+    static readonly Regex ProjectOrGroupBotRx =
+new(@"^(project|group)_[0-9]+_bot($|_)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    static bool IsBotUsername(string? username)
+        => !string.IsNullOrEmpty(username) && ProjectOrGroupBotRx.IsMatch(username!);
 }

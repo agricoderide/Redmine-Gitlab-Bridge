@@ -11,12 +11,10 @@ public sealed record ProjectLink(
 
 
 public sealed record IssueBasic(
-    int?  RedmineId,
+    int? RedmineId,
     long? GitLabIid,
     string Title,
-    string? Description,
-    string? TrackerName = null,              // <- used by seeder to filter RM
-    IReadOnlyList<string>? Labels = null     // <- used by seeder to map GL -> RM tracker
+    string? Description
 );
 
 

@@ -37,6 +37,8 @@ public sealed class Program
                     attempt => TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt))
                               + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 250)));
 
+        builder.Services.Configure<TrackersKeys>(builder.Configuration.GetSection("Trackers"));
+
         // Typed HttpClients for external services, using the above retry policy
         builder.Services.AddHttpClient<RedmineClient>().AddPolicyHandler(RetryPolicy());
         builder.Services.AddHttpClient<GitLabClient>().AddPolicyHandler(RetryPolicy());
@@ -63,7 +65,7 @@ public sealed class Program
         // Database seeding util
         builder.Services.AddScoped<DbSeeder>();
 
-        
+
 
         var app = builder.Build();
 
@@ -87,7 +89,7 @@ public sealed class Program
             await seeder.SeedAsync();
         }
 
-        
+
 
         // Health
         app.MapGet("/health", () => Results.Ok(new { status = "ok" }));

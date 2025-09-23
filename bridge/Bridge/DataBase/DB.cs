@@ -9,9 +9,7 @@ public sealed class SyncDbContext : DbContext
     public DbSet<ProjectSync> Projects => Set<ProjectSync>();
     public DbSet<GitLabProject> GitLabProjects => Set<GitLabProject>();
     public DbSet<IssueMapping> IssueMappings => Set<IssueMapping>();
-    public DbSet<Tracker> Trackers => Set<Tracker>();
     public DbSet<User> Users => Set<User>();
-    public DbSet<ProjectMembership> ProjectMemberships => Set<ProjectMembership>();
     public SyncDbContext(DbContextOptions<SyncDbContext> options) : base(options) { }
 }
 
@@ -23,7 +21,6 @@ public sealed class ProjectSync
     [Key] public int Id { get; set; }
     public int RedmineProjectId { get; set; }
     [Required] public string RedmineIdentifier { get; set; } = "";
-    [Required] public string Name { get; set; } = "";
     public DateTimeOffset? LastSyncUtc { get; set; }
     public GitLabProject? GitLabProject { get; set; }
 }
@@ -56,18 +53,6 @@ public sealed class IssueMapping
 }
 
 
-[Index(nameof(RedmineTrackerId), IsUnique = true)]
-[Index(nameof(Name), IsUnique = true)]
-public sealed class Tracker
-{
-    [Key] public int Id { get; set; }
-
-    public int RedmineTrackerId { get; set; }
-
-    [Required] public string Name { get; set; } = "";
-}
-
-
 
 [Index(nameof(RedmineUserId), IsUnique = true)]
 [Index(nameof(GitLabUserId), IsUnique = true)]
@@ -78,22 +63,6 @@ public sealed class User
     public int? RedmineUserId { get; set; }   // RM numeric id
     public int? GitLabUserId { get; set; }   // GL numeric id
 
-    [Required] public string DisplayName { get; set; } = "";
-    public string? RedmineLogin { get; set; }
-    public string? GitLabUsername { get; set; }
-    public string? Email { get; set; }
-}
+    public string? Username { get; set; }
 
-[Index(nameof(ProjectSyncId), nameof(UserId), nameof(Source), IsUnique = true)]
-public sealed class ProjectMembership
-{
-    [Key] public int Id { get; set; }
-
-    public int ProjectSyncId { get; set; }
-    public ProjectSync ProjectSync { get; set; } = null!;
-
-    public int UserId { get; set; }
-    public User User { get; set; } = null!;
-
-    public string Source { get; set; } = "Redmine"; // "Redmine" or "GitLab"
 }

@@ -4,6 +4,7 @@ using System.Text.Json;
 using Bridge.Contracts;
 using Bridge.Infrastructure.Options;
 using Microsoft.Extensions.Options;
+using Redmine.Net.Api.Types;
 
 namespace Bridge.Services;
 
@@ -12,13 +13,18 @@ namespace Bridge.Services;
 /// </summary>
 public sealed class RedmineClient
 {
+    public record RmMember(int Id, string Name);
+
     private readonly HttpClient _http;
     public readonly RedmineOptions _opt;
+    public readonly TrackersKeys _trackers;
 
-    public RedmineClient(HttpClient http, IOptions<RedmineOptions> opt)
+    public RedmineClient(HttpClient http, IOptions<RedmineOptions> opt, IOptions<TrackersKeys> trackers)
     {
         _http = http;
         _opt = opt.Value;
+
+        _trackers = trackers.Value;
 
         _http.BaseAddress = new Uri(_opt.BaseUrl.TrimEnd('/') + "/");
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -88,28 +94,25 @@ public sealed class RedmineClient
         return list;
     }
 
-    // RedmineClient.cs
-    public async Task<IReadOnlyList<(int Id, string Name, string? Login, string? Email)>> GetProjectMembersAsync(
-        string projectIdOrKey, CancellationToken ct = default)
+    // Redmine: project memberships (id + name)
+    public async Task<List<RmMember>> GetRedmineMembersAsync(int projID, CancellationToken ct = default)
     {
-        var resp = await _http.GetAsync($"projects/{projectIdOrKey}/memberships.json?limit=100", ct);
-        if (!resp.IsSuccessStatusCode) return Array.Empty<(int, string, string?, string?)>();
-
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-        if (!doc.RootElement.TryGetProperty("memberships", out var arr) || arr.ValueKind != JsonValueKind.Array)
-            return Array.Empty<(int, string, string?, string?)>();
-
-        var list = new List<(int, string, string?, string?)>();
-        foreach (var m in arr.EnumerateArray())
+        var all = new List<RmMember>();
+        for (int offset = 0; ; offset += 100)
         {
-            if (!m.TryGetProperty("user", out var u) || u.ValueKind != JsonValueKind.Object) continue;
-            var id = u.TryGetProperty("id", out var idp) ? idp.GetInt32() : 0;
-            var name = u.TryGetProperty("name", out var np) ? (np.GetString() ?? "") : "";
-            var login = u.TryGetProperty("login", out var lp) ? lp.GetString() : null;
-            var mail = u.TryGetProperty("mail", out var mp) ? mp.GetString() : null;
-            if (id != 0) list.Add((id, name, login, mail));
+            var resp = await _http.GetAsync($"/projects/{projID}/memberships.json?limit=100&offset={offset}", ct);
+            if (!resp.IsSuccessStatusCode) throw new HttpRequestException($"{(int)resp.StatusCode} {resp.ReasonPhrase}");
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            var memberships = doc.RootElement.GetProperty("memberships").EnumerateArray().ToList();
+            foreach (var m in memberships)
+            {
+                var u = m.GetProperty("user");
+                all.Add(new RmMember(u.GetProperty("id").GetInt32(), u.GetProperty("name").GetString() ?? ""));
+            }
+            var total = doc.RootElement.TryGetProperty("total_count", out var t) ? t.GetInt32() : all.Count;
+            if (all.Count >= total || memberships.Count == 0) break;
         }
-        return list;
+        return all;
     }
 
 
@@ -130,59 +133,24 @@ public sealed class RedmineClient
             var id = it.GetProperty("id").GetInt32();
             var title = it.TryGetProperty("subject", out var s) ? (s.GetString() ?? "") : "";
             var desc = it.TryGetProperty("description", out var d) ? d.GetString() : null;
+            string? tracker = it.TryGetProperty("tracker", out var t) ? (t.TryGetProperty("name", out var tt) ? tt.GetString() : null) : null;
+            if (tracker == null || !_trackers.ConvertAll(d => d.ToLower()).Contains(tracker.ToLower()))
+                continue;
 
-            string? trackerName = null;
-            if (it.TryGetProperty("tracker", out var tr) && tr.ValueKind == JsonValueKind.Object &&
-                tr.TryGetProperty("name", out var tn))
-                trackerName = tn.GetString();
 
-            list.Add(new IssueBasic(id, null, title, desc, trackerName, null));
+            list.Add(new IssueBasic(id, null, title, desc));
         }
         return list;
+
     }
 
-    public async Task<IReadOnlyList<(int Id, string Name)>> GetProjectTrackersAsync(
-        string projectIdOrKey,
-        CancellationToken ct = default)
-    {
-        // You must include `trackers` explicitly
-        var resp = await _http.GetAsync($"projects/{Uri.EscapeDataString(projectIdOrKey)}.json?include=trackers", ct);
-        if (!resp.IsSuccessStatusCode)
-            return Array.Empty<(int, string)>();
-
-        var body = await resp.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(body);
-
-        if (!doc.RootElement.TryGetProperty("project", out var p))
-        {
-            // Optional: log body to see what came back (permissions, wrong id, etc.)
-            // _log.LogWarning("Project response missing 'project' for {Project}. Body: {Body}", projectIdOrKey, body);
-            return Array.Empty<(int, string)>();
-        }
-
-        if (!p.TryGetProperty("trackers", out var tarr) || tarr.ValueKind != JsonValueKind.Array)
-        {
-            // Optional: log body to diagnose why trackers aren't present
-            // _log.LogInformation("No trackers in response for {Project}. Body: {Body}", projectIdOrKey, body);
-            return Array.Empty<(int, string)>();
-        }
-
-        var list = new List<(int, string)>(tarr.GetArrayLength());
-        foreach (var t in tarr.EnumerateArray())
-        {
-            if (t.TryGetProperty("id", out var idp) && t.TryGetProperty("name", out var np))
-                list.Add((idp.GetInt32(), np.GetString() ?? ""));
-        }
-        return list;
-    }
 
 
     public async Task<(bool ok, int id, string message)> CreateIssueAsync(
         string projectIdOrKey,
         string subject,
         string? description = null,
-        CancellationToken ct = default,
-        int? trackerId = null) // <- seeder passes Feature/Bug id here
+        CancellationToken ct = default) // <- seeder passes Feature/Bug id here
     {
         var issue = new Dictionary<string, object?>
         {
@@ -190,7 +158,6 @@ public sealed class RedmineClient
             ["subject"] = subject,
             ["description"] = description
         };
-        if (trackerId is int tid) issue["tracker_id"] = tid;
 
         using var content = new StringContent(JsonSerializer.Serialize(new { issue }), Encoding.UTF8, "application/json");
         var resp = await _http.PostAsync("issues.json", content, ct);

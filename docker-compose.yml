@@ -35,34 +35,34 @@ services:
       TZ: ${TZ}
     shm_size: "1g"
     ports:
-      - "8888:80"             # http://localhost:8080
-      - "2222:22"             # SSH
+      - "12345:80"             # http://localhost:8080
+      # - "2222:22"             # SSH
     volumes:
       - gitlab-config:/etc/gitlab
       - gitlab-logs:/var/log/gitlab
       - gitlab-data:/var/opt/gitlab
     restart: unless-stopped
 
-  bridge:
-    build:
-      context: ./bridge
-    environment:
-      # Filled via .env (see .env.example)
-      REDMINE_URL: ${REDMINE_URL}
-      REDMINE_API_KEY: ${REDMINE_API_KEY}
-      REDMINE_WEBHOOK_SECRET: ${REDMINE_WEBHOOK_SECRET}
-      GITLAB_URL: ${GITLAB_URL}
-      GITLAB_TOKEN: ${GITLAB_TOKEN}
-      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET}
-      MIRROR_STRATEGY: ${MIRROR_STRATEGY}
-      MAPPING_PATH: /app/mapping.json
-      LOG_LEVEL: ${LOG_LEVEL}
-    volumes:
-      - ./bridge/mapping.example.json:/app/mapping.json:ro
-    ports:
-      - "5001:5001"           # http://localhost:5001/health
-    depends_on: [redmine, gitlab]
-    restart: unless-stopped
+  # bridge:
+  #   build:
+  #     context: ./bridge
+  #   environment:
+  #     # Filled via .env (see .env.example)
+  #     REDMINE_URL: ${REDMINE_URL}
+  #     REDMINE_API_KEY: ${REDMINE_API_KEY}
+  #     REDMINE_WEBHOOK_SECRET: ${REDMINE_WEBHOOK_SECRET}
+  #     GITLAB_URL: ${GITLAB_URL}
+  #     GITLAB_TOKEN: ${GITLAB_TOKEN}
+  #     GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET}
+  #     MIRROR_STRATEGY: ${MIRROR_STRATEGY}
+  #     MAPPING_PATH: /app/mapping.json
+  #     LOG_LEVEL: ${LOG_LEVEL}
+  #   volumes:
+  #     - ./bridge/mapping.example.json:/app/mapping.json:ro
+  #   ports:
+  #     - "5001:5001"           # http://localhost:5001/health
+  #   depends_on: [redmine, gitlab]
+  #   restart: unless-stopped
 
 volumes:
   redmine-db-data: {}

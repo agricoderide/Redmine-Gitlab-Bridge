@@ -1,33 +1,12 @@
-// Bridge/Services/DbSeeder.cs
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 using Bridge.Contracts;
 using Bridge.Data;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
+
 
 namespace Bridge.Services;
 
-/// <summary>
-/// Seeds projects from Redmine and synchronizes issues with GitLab.
-/// 1) Migrate DB
-/// 2) Upsert ProjectSync + GitLabProject (from Redmine CF)
-/// 3) Resolve GitLab project ID (if path present)
-/// 4) Pair issues by exact (trimmed, case-insensitive) title
-/// 5) Backfill remaining issues (directions configurable)
-/// Plus:
-/// - Only sync Redmine trackers: Feature/Bug
-/// - For GL → RM, choose Redmine tracker based on GitLab labels ("feature"/"bug")
-/// - Upsert Redmine project trackers into local Trackers table
-/// </summary>
 public sealed class DbSeeder
 {
-    // Toggle backfill directions to be safer in production if needed.
-    private const bool BackfillRedmineToGitLab = true;
-    private const bool BackfillGitLabToRedmine = true;
-
     private readonly RedmineClient _redmine;
     private readonly GitLabClient _gitlab;
     private readonly SyncDbContext _db;
@@ -41,12 +20,18 @@ public sealed class DbSeeder
         _log = log;
     }
 
+
+
+
     public async Task SeedAsync(CancellationToken ct = default)
     {
         // 1) Apply pending EF Core migrations
         await _db.Database.MigrateAsync(ct);
 
+        // Create Users table, i do not care about membership
 
+        #region RedmineAndAssociatedGitlabProjects 
+        // And also fill the gitlab table
         ////////////////////////// 2) Fill the Redmine Table
         IReadOnlyList<ProjectLink> listProjects =
             await _redmine.GetProjectsWithGitLabLinksAsync(_redmine._opt.GitlabCustomField, ct);
@@ -66,7 +51,6 @@ public sealed class DbSeeder
                 {
                     RedmineProjectId = goodProjWithGitlab.RedmineProjectId,
                     RedmineIdentifier = goodProjWithGitlab.RedmineIdentifier,
-                    Name = goodProjWithGitlab.Name
                 };
                 _db.Projects.Add(proj);
             }
@@ -74,7 +58,6 @@ public sealed class DbSeeder
             {
                 // Refresh local metadata
                 proj.RedmineIdentifier = goodProjWithGitlab.RedmineIdentifier;
-                proj.Name = goodProjWithGitlab.Name;
             }
 
 
@@ -118,12 +101,11 @@ public sealed class DbSeeder
             ////////////////////////////////////////////////////////////////////////////////////////////////////
             await _db.SaveChangesAsync(ct);
         }
+        #endregion
 
 
 
 
-
-        // 5) Pair + 6) Backfill issues between Redmine and GitLab
         var projects = await _db.Projects
             .Include(p => p.GitLabProject)
             .ToListAsync(ct);
@@ -134,132 +116,74 @@ public sealed class DbSeeder
             if (p.GitLabProject?.GitLabProjectId is not long glId)
                 continue; // need concrete GitLab project id
 
-            // Prefer identifier, else numeric Redmine id
-            var rmKey = string.IsNullOrWhiteSpace(p.RedmineIdentifier)
-                ? p.RedmineProjectId.ToString()
-                : p.RedmineIdentifier;
+            var rmKey = p.RedmineProjectId.ToString();
 
 
-            #region User
-            var rmMembers = await _redmine.GetProjectMembersAsync(rmKey, ct);
-            foreach (var (id, name, login, email) in rmMembers)
+
+            #region Users
+            try
             {
-                var u = await _db.Users.SingleOrDefaultAsync(x => x.RedmineUserId == id, ct);
-                if (u is null)
+                var gitlabUsers = await _gitlab.GetGitLabProjectMembersAsync((int)p.GitLabProject.GitLabProjectId);
+                var redmineUsers = await _redmine.GetRedmineMembersAsync(p.Id);
+
+                var seen = new HashSet<(int rmId, int glId)>();
+                var toAdd = new List<User>();
+
+                foreach (var gl in gitlabUsers)
                 {
-                    _db.Users.Add(new User
+                    var key = ExtractSearchKey(gl.Username);
+
+                    foreach (var rm in redmineUsers)
                     {
-                        RedmineUserId = id,
-                        DisplayName = name,
-                        RedmineLogin = login,
-                        Email = email
-                    });
+                        if (rm.Name.Contains(key, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (seen.Add((rm.Id, gl.Id)))
+                            {
+                                bool exists = await _db.Users.AnyAsync(u => u.RedmineUserId == rm.Id);
+                                if (!exists)
+                                {
+                                    toAdd.Add(new User
+                                    {
+                                        RedmineUserId = rm.Id,
+                                        GitLabUserId = gl.Id,
+                                        Username = gl.Username
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
-                else
-                {
-                    if (!StringComparer.Ordinal.Equals(u.DisplayName, name)) u.DisplayName = name;
-                    if (!StringComparer.Ordinal.Equals(u.RedmineLogin, login)) u.RedmineLogin = login;
-                    if (!StringComparer.Ordinal.Equals(u.Email, email)) u.Email = email;
-                }
-            }
-            await _db.SaveChangesAsync(ct);
 
-            // link memberships to the project (source=Redmine)
-            foreach (var (id, _, _, _) in rmMembers)
-            {
-                var uid = await _db.Users.Where(x => x.RedmineUserId == id).Select(x => x.Id).FirstAsync(ct);
-                var exists = await _db.ProjectMemberships.AnyAsync(m =>
-                    m.ProjectSyncId == p.Id && m.UserId == uid && m.Source == "Redmine", ct);
-                if (!exists)
-                    _db.ProjectMemberships.Add(new ProjectMembership { ProjectSyncId = p.Id, UserId = uid, Source = "Redmine" });
-            }
-            await _db.SaveChangesAsync(ct);
-
-            // GitLab members
-            var glMembers = await _gitlab.GetProjectMembersAsync(glId, ct);
-            foreach (var (id, name, username, email) in glMembers)
-            {
-                var u = await _db.Users.SingleOrDefaultAsync(x => x.GitLabUserId == id, ct);
-                if (u is null)
+                if (toAdd.Count > 0)
                 {
-                    _db.Users.Add(new User
-                    {
-                        GitLabUserId = id,
-                        DisplayName = name,
-                        GitLabUsername = username,
-                        Email = email
-                    });
-                }
-                else
-                {
-                    if (!StringComparer.Ordinal.Equals(u.DisplayName, name)) u.DisplayName = name;
-                    if (!StringComparer.Ordinal.Equals(u.GitLabUsername, username)) u.GitLabUsername = username;
-                    if (!StringComparer.Ordinal.Equals(u.Email, email)) u.Email = email;
+                    _db.Users.AddRange(toAdd);
+                    await _db.SaveChangesAsync();
                 }
             }
-            await _db.SaveChangesAsync(ct);
-
-            // link memberships to the project (source=GitLab)
-            foreach (var (id, _, _, _) in glMembers)
+            catch (Exception ex)
             {
-                var uid = await _db.Users.Where(x => x.GitLabUserId == id).Select(x => x.Id).FirstAsync(ct);
-                var exists = await _db.ProjectMemberships.AnyAsync(m =>
-                    m.ProjectSyncId == p.Id && m.UserId == uid && m.Source == "GitLab", ct);
-                if (!exists)
-                    _db.ProjectMemberships.Add(new ProjectMembership { ProjectSyncId = p.Id, UserId = uid, Source = "GitLab" });
+                Console.WriteLine(ex);
             }
-            await _db.SaveChangesAsync(ct);
             #endregion
 
-            #region Trackers
-            var trackers = await _redmine.GetProjectTrackersAsync(rmKey, ct);
-            foreach (var (tid, name) in trackers)
-            {
-                var existing = await _db.Trackers.SingleOrDefaultAsync(t => t.RedmineTrackerId == tid, ct);
-                if (existing is null)
-                {
-                    _db.Trackers.Add(new Tracker { RedmineTrackerId = tid, Name = name });
-                }
-                else if (!StringComparer.Ordinal.Equals(existing.Name, name))
-                {
-                    existing.Name = name;
-                }
-            }
-            await _db.SaveChangesAsync(ct);
-            #endregion
+
 
 
             #region IssuesSyncing
-            var featureId = await _db.Trackers
-                .Where(t => t.Name == "Feature")
-                .Select(t => (int?)t.RedmineTrackerId)
-                .FirstOrDefaultAsync(ct);
 
-            var bugId = await _db.Trackers
-                .Where(t => t.Name == "Bug")
-                .Select(t => (int?)t.RedmineTrackerId)
-                .FirstOrDefaultAsync(ct);
-
-            // Fetch basic issues (NOTE: consider pagination if >300 items expected)
-            var rmIssues = await _redmine.GetProjectIssuesBasicAsync(rmKey, ct);
-            var glIssues = await _gitlab.GetProjectIssuesBasicAsync(glId, ct);
-
-            // Filter Redmine issues to only Feature or Bug
-            rmIssues = rmIssues
-                .Where(i => string.Equals(i.TrackerName, "Feature", System.StringComparison.OrdinalIgnoreCase)
-                         || string.Equals(i.TrackerName, "Bug", System.StringComparison.OrdinalIgnoreCase))
-                .ToList();
+            IReadOnlyList<IssueBasic> rmIssues = await _redmine.GetProjectIssuesBasicAsync(rmKey, ct);
+            IReadOnlyList<IssueBasic> glIssues = await _gitlab.GetProjectIssuesBasicAsync(glId, ct);
 
             // Existing mappings for this project (avoid duplicates)
             var mappedRm = new HashSet<int>(_db.IssueMappings
                 .Where(m => m.ProjectSyncId == p.Id)
                 .Select(m => m.RedmineIssueId));
-
             var mappedGl = new HashSet<long>(_db.IssueMappings
                 .Where(m => m.ProjectSyncId == p.Id)
                 .Select(m => m.GitLabIssueId));
 
-            // Pair by exact (trimmed, case-insensitive) title — unique matches only
+
+            // Get all non duplicated issues from gitlab
             var glByTitle = glIssues
                 .Where(i => !string.IsNullOrWhiteSpace(i.Title))
                 .GroupBy(i => i.Title.Trim(), System.StringComparer.OrdinalIgnoreCase)
@@ -267,11 +191,14 @@ public sealed class DbSeeder
 
             foreach (var rmi in rmIssues)
             {
+                // the issue already exists in mappedRM, continue
                 if (rmi.RedmineId is not int rmId || mappedRm.Contains(rmId)) continue;
+
 
                 var title = rmi.Title?.Trim();
                 if (string.IsNullOrEmpty(title)) continue;
 
+                // check to see if that titles exists in gitlab already
                 if (!glByTitle.TryGetValue(title, out var cands) || cands.Count != 1) continue;
 
                 var gl = cands[0];
@@ -290,99 +217,92 @@ public sealed class DbSeeder
 
             await _db.SaveChangesAsync(ct);
 
+
+
             // Keep filling issues for issues not with title match
-            if (BackfillRedmineToGitLab)
+            foreach (var rmi in rmIssues) // rmIssues already filtered to Feature/Bug
             {
-                foreach (var rmi in rmIssues) // rmIssues already filtered to Feature/Bug
+                if (rmi.RedmineId is not int rmId || mappedRm.Contains(rmId)) continue;
+
+
+                var (ok, newIid, msg) = await _gitlab.CreateIssueAsync(
+                    glId,
+                    rmi.Title,
+                    rmi.Description,
+                    ct
+                );
+                if (!ok)
                 {
-                    if (rmi.RedmineId is not int rmId || mappedRm.Contains(rmId)) continue;
-
-                    // extra guard in case filter changes later
-                    var trackerName = (rmi.TrackerName ?? "").Trim();
-                    if (!trackerName.Equals("feature", StringComparison.OrdinalIgnoreCase) &&
-                        !trackerName.Equals("bug", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    // set a GitLab label that mirrors the tracker
-                    var glLabels = trackerName.Equals("bug", StringComparison.OrdinalIgnoreCase) ? "bug" : "feature";
-
-                    var (ok, newIid, msg) = await _gitlab.CreateIssueAsync(
-                        glId,
-                        rmi.Title,
-                        rmi.Description,
-                        labelsCsv: glLabels,  // <— important: add label on GL side
-                        ct
-                    );
-                    if (!ok)
-                    {
-                        _log.LogWarning("GitLab create issue failed for project {GlProjectId}: {Msg}", glId, msg);
-                        continue;
-                    }
-
-                    _db.IssueMappings.Add(new IssueMapping
-                    {
-                        ProjectSyncId = p.Id,
-                        RedmineIssueId = rmId,
-                        GitLabIssueId = newIid,
-                        LastSyncedUtc = System.DateTimeOffset.UtcNow
-                    });
-
-                    mappedRm.Add(rmId);
-                    mappedGl.Add(newIid);
+                    _log.LogWarning("GitLab create issue failed for project {GlProjectId}: {Msg}", glId, msg);
+                    continue;
                 }
 
-                await _db.SaveChangesAsync(ct);
-            }
-            // 6) Backfill GL → RM for unmapped issues
-            // Create only if GitLab labels indicate "bug" or "feature",
-            // and use the corresponding Redmine tracker id.
-            if (BackfillGitLabToRedmine)
-            {
-                foreach (var gli in glIssues)
+                _db.IssueMappings.Add(new IssueMapping
                 {
-                    if (gli.GitLabIid is not long giid || mappedGl.Contains(giid)) continue;
+                    ProjectSyncId = p.Id,
+                    RedmineIssueId = rmId,
+                    GitLabIssueId = newIid,
+                    LastSyncedUtc = System.DateTimeOffset.UtcNow
+                });
 
-                    // Decide tracker from labels
-                    int? trackerIdToUse = null;
-                    if (gli.Labels is { Count: > 0 })
-                    {
-                        bool isBug = gli.Labels.Any(l => string.Equals(l, "bug", System.StringComparison.OrdinalIgnoreCase));
-                        bool isFeature = gli.Labels.Any(l => string.Equals(l, "feature", System.StringComparison.OrdinalIgnoreCase));
-                        if (isBug && bugId != null) trackerIdToUse = bugId;
-                        else if (isFeature && featureId != null) trackerIdToUse = featureId;
-                    }
+                mappedRm.Add(rmId);
+                mappedGl.Add(newIid);
+            }
 
-                    // If no suitable label → skip creating in Redmine
-                    if (trackerIdToUse is null) continue;
+            await _db.SaveChangesAsync(ct);
 
-                    var (rok, newRmId, rmsg) = await _redmine.CreateIssueAsync(
-                        rmKey,
-                        gli.Title,
-                        gli.Description,
-                        ct,
-                        trackerId: trackerIdToUse.Value
-                    );
-                    if (!rok)
-                    {
-                        _log.LogWarning("Redmine create issue failed for project {RmKey}: {Msg}", rmKey, rmsg);
-                        continue;
-                    }
 
-                    _db.IssueMappings.Add(new IssueMapping
-                    {
-                        ProjectSyncId = p.Id,
-                        RedmineIssueId = newRmId,
-                        GitLabIssueId = giid,
-                        LastSyncedUtc = System.DateTimeOffset.UtcNow
-                    });
-                    mappedGl.Add(giid);
-                    mappedRm.Add(newRmId);
+            foreach (var gli in glIssues)
+            {
+                if (gli.GitLabIid is not long giid || mappedGl.Contains(giid)) continue;
+
+                var (rok, newRmId, rmsg) = await _redmine.CreateIssueAsync(
+                    rmKey,
+                    gli.Title,
+                    gli.Description,
+                    ct
+                );
+                if (!rok)
+                {
+                    _log.LogWarning("Redmine create issue failed for project {RmKey}: {Msg}", rmKey, rmsg);
+                    continue;
                 }
 
-                await _db.SaveChangesAsync(ct);
+                _db.IssueMappings.Add(new IssueMapping
+                {
+                    ProjectSyncId = p.Id,
+                    RedmineIssueId = newRmId,
+                    GitLabIssueId = giid,
+                    LastSyncedUtc = System.DateTimeOffset.UtcNow
+                });
+                mappedGl.Add(giid);
+                mappedRm.Add(newRmId);
             }
+
+            await _db.SaveChangesAsync(ct);
+
             #endregion
         }
 
     }
+
+    static string ExtractSearchKey(string username)
+    {
+        if (string.IsNullOrWhiteSpace(username)) return "";
+
+        username = username.Trim();
+
+        // if username has separators like john.prior → take last part
+        var parts = username.Split(new[] { '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length > 1)
+            return parts[^1];
+
+        // compact handles like "rprior" → drop the first letter if long enough
+        if (username.Length >= 4)
+            return username.Substring(1);
+
+        return username;
+    }
+
+
 }
