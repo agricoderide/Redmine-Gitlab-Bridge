@@ -299,6 +299,61 @@ public sealed class RedmineClient
         return null;
     }
 
+    // ADD near your other usings
+
+    // ADD in class RedmineClient
+    public async Task<IssueBasic> GetSingleIssueBasicAsync(int issueId, CancellationToken ct = default)
+    {
+        var resp = await _http.GetAsync($"issues/{issueId}.json", ct);
+        resp.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        var it = doc.RootElement.GetProperty("issue");
+
+        var title = it.TryGetProperty("subject", out var s) ? s.GetString() ?? "" : "";
+        var desc = it.TryGetProperty("description", out var d) ? d.GetString() : null;
+
+        string? tracker = it.TryGetProperty("tracker", out var t) && t.TryGetProperty("name", out var tn) ? tn.GetString() : null;
+        var labels = tracker is null ? null : new List<string> { tracker };
+
+        int? assigneeId = it.TryGetProperty("assigned_to", out var at) && at.TryGetProperty("id", out var aid) ? aid.GetInt32() : (int?)null;
+        var status = it.TryGetProperty("status", out var st) && st.TryGetProperty("name", out var sn) ? sn.GetString() : null;
+
+        DateTime? due = null;
+        if (it.TryGetProperty("due_date", out var dd) && dd.ValueKind == JsonValueKind.String)
+            due = DateTime.Parse(dd.GetString()!);
+
+        DateTimeOffset? updated = null;
+        if (it.TryGetProperty("updated_on", out var uo) && uo.ValueKind == JsonValueKind.String)
+            updated = DateTimeOffset.Parse(uo.GetString()!, null, System.Globalization.DateTimeStyles.AssumeUniversal);
+
+        return new IssueBasic(issueId, null, title, desc, labels, assigneeId, due, status, updated);
+    }
+
+    public async Task<(bool ok, string message)> UpdateIssueAsync(
+        int issueId,
+        string? subject = null,
+        string? description = null,
+        int? trackerId = null,
+        int? assigneeId = null,
+        DateTime? dueDate = null,
+        int? statusId = null,
+        CancellationToken ct = default)
+    {
+        var issue = new Dictionary<string, object?>();
+        if (subject is not null) issue["subject"] = subject;
+        if (description is not null) issue["description"] = description;
+        if (trackerId.HasValue) issue["tracker_id"] = trackerId.Value;
+        if (assigneeId.HasValue) issue["assigned_to_id"] = assigneeId.Value;
+        if (dueDate.HasValue) issue["due_date"] = dueDate.Value.ToString("yyyy-MM-dd");
+        if (statusId.HasValue) issue["status_id"] = statusId.Value;
+
+        using var content = new StringContent(JsonSerializer.Serialize(new { issue }), Encoding.UTF8, "application/json");
+        var resp = await _http.PutAsync($"issues/{issueId}.json", content, ct);
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        return resp.IsSuccessStatusCode ? (true, "updated")
+                                        : (false, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {body}");
+    }
+
 
 
 

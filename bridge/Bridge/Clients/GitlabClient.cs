@@ -252,6 +252,76 @@ string? state = null,
         }
         return all;
     }
+
+
+
+
+    // ADD in class GitLabClient
+    public async Task<IssueBasic> GetSingleIssueBasicAsync(long projectId, long issueIid, CancellationToken ct = default)
+    {
+        var resp = await _http.GetAsync($"projects/{projectId}/issues/{issueIid}", ct);
+        resp.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        var e = doc.RootElement;
+
+        var title = e.GetProperty("title").GetString() ?? "";
+        var desc = e.TryGetProperty("description", out var d) ? d.GetString() : null;
+
+        List<string>? labels = null;
+        if (e.TryGetProperty("labels", out var labs) && labs.ValueKind == JsonValueKind.Array)
+            labels = labs.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList();
+
+        int? assigneeId = null;
+        if (e.TryGetProperty("assignees", out var ass) && ass.ValueKind == JsonValueKind.Array)
+        {
+            var first = ass.EnumerateArray().FirstOrDefault();
+            if (first.ValueKind == JsonValueKind.Object && first.TryGetProperty("id", out var aid))
+                assigneeId = aid.GetInt32();
+        }
+
+        DateTime? due = null;
+        if (e.TryGetProperty("due_date", out var dd) && dd.ValueKind == JsonValueKind.String)
+            due = DateTime.Parse(dd.GetString()!);
+
+        var state = e.TryGetProperty("state", out var st) ? st.GetString() : null;
+
+        DateTimeOffset? updated = null;
+        if (e.TryGetProperty("updated_at", out var ua) && ua.ValueKind == JsonValueKind.String)
+            updated = DateTimeOffset.Parse(ua.GetString()!, null, System.Globalization.DateTimeStyles.AssumeUniversal);
+
+        var iid = e.GetProperty("iid").GetInt64();
+        return new IssueBasic(null, iid, title, desc, labels, assigneeId, due, state, updated);
+    }
+
+    public async Task<(bool ok, string message)> UpdateIssueAsync(
+        long projectId, long issueIid,
+        string? title = null,
+        string? description = null,
+        IEnumerable<string>? labels = null,
+        int? assigneeId = null,
+        DateTime? dueDate = null,
+        string? state = null,
+        CancellationToken ct = default)
+    {
+        var payload = new Dictionary<string, object?>();
+        if (title is not null) payload["title"] = title;
+        if (description is not null) payload["description"] = description;
+        if (labels is not null) payload["labels"] = string.Join(",", labels);
+        if (assigneeId.HasValue) payload["assignee_ids"] = new[] { assigneeId.Value };
+        if (dueDate.HasValue) payload["due_date"] = dueDate.Value.ToString("yyyy-MM-dd");
+        if (!string.IsNullOrEmpty(state))
+            payload["state_event"] = string.Equals(state, "closed", StringComparison.OrdinalIgnoreCase) ? "close"
+                              : string.Equals(state, "opened", StringComparison.OrdinalIgnoreCase) ? "reopen" : null;
+
+        using var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        var resp = await _http.PutAsync($"projects/{projectId}/issues/{issueIid}", content, ct);
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        return resp.IsSuccessStatusCode ? (true, "updated")
+                                        : (false, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {body}");
+    }
+
+
+
     // -------------
     // Helpers
     // -------------
@@ -259,7 +329,7 @@ string? state = null,
         e.TryGetProperty(name, out var v) ? v.GetString() : null;
 
     static readonly Regex ProjectOrGroupBotRx =
-new(@"^(project|group)_[0-9]+_bot($|_)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    new(@"^(project|group)_[0-9]+_bot($|_)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     static bool IsBotUsername(string? username)
         => !string.IsNullOrEmpty(username) && ProjectOrGroupBotRx.IsMatch(username!);

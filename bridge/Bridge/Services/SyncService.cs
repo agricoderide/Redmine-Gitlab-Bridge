@@ -195,12 +195,18 @@ public sealed class SyncService
             var gl = cands[0];
             if (gl.GitLabIid is not long giid || mappedGl.Contains(giid)) continue;
 
-            _db.IssueMappings.Add(new IssueMapping
+            var mapping = new IssueMapping
             {
                 ProjectSyncId = p.Id,
                 RedmineIssueId = rmId,
                 GitLabIssueId = giid,
-            });
+            };
+            _db.IssueMappings.Add(mapping);
+
+            // INIT canonical (choose GL as initial truth)
+            var glCurrent = await _gitlab.GetSingleIssueBasicAsync(glId, giid, ct);
+            await PatchRedmineFromGitLabAsync(p, mapping, glCurrent, ct); // ensure RM mirrors GL on first link
+            mapping.CanonicalSnapshotJson = Serialize(glCurrent);
             mappedRm.Add(rmId);
             mappedGl.Add(giid);
         }
@@ -219,6 +225,18 @@ public sealed class SyncService
         {
             await CreateRedmineFromGitLabAsync(p, gli, mappedRm, mappedGl, ct);
         }
+
+        // ADD at the end of SyncIssuesAsync
+        var mappings = await _db.IssueMappings
+            .Where(m => m.ProjectSyncId == p.Id)
+            .ToListAsync(ct);
+
+        foreach (var m in mappings)
+        {
+            await ProcessPairByCanonicalAsync(p, m, ct);
+        }
+
+
         await _db.SaveChangesAsync(ct);
     }
 
@@ -288,12 +306,18 @@ public sealed class SyncService
             return;
         }
 
-        _db.IssueMappings.Add(new IssueMapping
+        var mapping = new IssueMapping
         {
             ProjectSyncId = p.Id,
             RedmineIssueId = newRmId,
             GitLabIssueId = giid,
-        });
+        };
+        _db.IssueMappings.Add(mapping);
+
+        // INIT canonical to GL (you just created RM from GL → both should match GL now)
+        var glCurrent = await _gitlab.GetSingleIssueBasicAsync(p.GitLabProject!.GitLabProjectId!.Value, giid, ct);
+        mapping.CanonicalSnapshotJson = Serialize(glCurrent);
+
 
         mappedGl.Add(giid);
         mappedRm.Add(newRmId);
@@ -337,17 +361,242 @@ public sealed class SyncService
             return;
         }
 
-        _db.IssueMappings.Add(new IssueMapping
+        var mapping = new IssueMapping
         {
             ProjectSyncId = p.Id,
             RedmineIssueId = rmId,
             GitLabIssueId = newIid,
-        });
+        };
+        _db.IssueMappings.Add(mapping);
+
+        // INIT canonical to RM (you just created GL from RM → both should match RM now)
+        var rmCurrent = await _redmine.GetSingleIssueBasicAsync(rmId, ct);
+        mapping.CanonicalSnapshotJson = Serialize(rmCurrent);
+
 
         mappedRm.Add(rmId);
         mappedGl.Add(newIid);
     }
-    
 
-    
+
+    // ADD inside class SyncService
+    private async Task<int?> ResolveRedmineStatusIdFromGitLabState(string? glState, CancellationToken ct)
+    {
+        var target = string.Equals(glState, "closed", StringComparison.OrdinalIgnoreCase) ? "Closed" : "New";
+        return await _db.StatusesRedmine.Where(s => s.Name == target)
+                 .Select(s => (int?)s.RedmineStatusId).FirstOrDefaultAsync(ct);
+    }
+
+    private static string? MapGitLabStateFromRedmine(string? rmStatus)
+    {
+        if (string.IsNullOrWhiteSpace(rmStatus)) return null;
+        return string.Equals(rmStatus, "Closed", StringComparison.OrdinalIgnoreCase) ? "closed" : "opened";
+    }
+
+    // Minimal JSON helpers for Canonical
+    private static string Serialize(IssueBasic i) => System.Text.Json.JsonSerializer.Serialize(i);
+    private static IssueBasic? Deserialize(string? json) =>
+        string.IsNullOrWhiteSpace(json) ? null : System.Text.Json.JsonSerializer.Deserialize<IssueBasic>(json);
+
+
+
+    // ADD inside class SyncService
+    private async Task PatchRedmineFromGitLabAsync(ProjectSync p, IssueMapping m, IssueBasic gl, CancellationToken ct)
+    {
+        int? trackerId = null;
+        if (gl.Labels?.FirstOrDefault() is string trackerName)
+            trackerId = await _db.TrackersRedmine.Where(t => t.Name.ToLower() == trackerName.ToLower())
+                                                 .Select(t => (int?)t.RedmineTrackerId)
+                                                 .FirstOrDefaultAsync(ct);
+
+        int? rmAssigneeId = gl.AssigneeId.HasValue
+            ? await _db.Users.Where(u => u.GitLabUserId == gl.AssigneeId.Value)
+                             .Select(u => (int?)u.RedmineUserId).FirstOrDefaultAsync(ct)
+            : null;
+
+        int? statusId = await ResolveRedmineStatusIdFromGitLabState(gl.Status, ct);
+
+        var (ok, msg) = await _redmine.UpdateIssueAsync(
+            m.RedmineIssueId,
+            subject: gl.Title,
+            description: gl.Description,
+            trackerId: trackerId,
+            assigneeId: rmAssigneeId,
+            dueDate: gl.DueDate,
+            statusId: statusId,
+            ct: ct
+        );
+        if (!ok) _log.LogWarning("RM update failed #{Rm}: {Msg}", m.RedmineIssueId, msg);
+    }
+
+    private async Task PatchGitLabFromRedmineAsync(ProjectSync p, IssueMapping m, IssueBasic rm, CancellationToken ct)
+    {
+        IEnumerable<string>? labels = rm.Labels ?? Enumerable.Empty<string>();
+        int? glAssigneeId = rm.AssigneeId.HasValue
+            ? await _db.Users.Where(u => u.RedmineUserId == rm.AssigneeId.Value)
+                             .Select(u => (int?)u.GitLabUserId).FirstOrDefaultAsync(ct)
+            : null;
+        var glState = MapGitLabStateFromRedmine(rm.Status);
+
+        var (ok, msg) = await _gitlab.UpdateIssueAsync(
+            p.GitLabProject!.GitLabProjectId!.Value,
+            m.GitLabIssueId,
+            title: rm.Title,
+            description: rm.Description,
+            labels: labels,
+            assigneeId: glAssigneeId,
+            dueDate: rm.DueDate,
+            state: glState,
+            ct: ct
+        );
+        if (!ok) _log.LogWarning("GL update failed !{Gl}: {Msg}", m.GitLabIssueId, msg);
+    }
+
+
+
+    // ADD inside class SyncService
+    private static IssueBasic MergePerFieldByUpdated(IssueBasic gl, IssueBasic rm)
+    {
+        bool glNewer = (gl.UpdatedAtUtc ?? DateTimeOffset.MinValue) >= (rm.UpdatedAtUtc ?? DateTimeOffset.MinValue);
+
+        string title = glNewer ? gl.Title : rm.Title;
+        string? desc = glNewer ? gl.Description : rm.Description;
+        List<string>? labs = glNewer ? gl.Labels : rm.Labels;
+        int? assignee = glNewer ? gl.AssigneeId : rm.AssigneeId;
+        DateTime? due = glNewer ? gl.DueDate : rm.DueDate;
+        string? status = glNewer ? gl.Status : rm.Status;
+        var updated = (gl.UpdatedAtUtc >= rm.UpdatedAtUtc) ? gl.UpdatedAtUtc : rm.UpdatedAtUtc;
+
+        return new IssueBasic(rm.RedmineId, gl.GitLabIid, title, desc, labs, assignee, due, status, updated);
+    }
+
+
+
+    // ADD inside class SyncService
+    public async Task ProcessPairByCanonicalAsync(ProjectSync p, IssueMapping m, CancellationToken ct)
+    {
+        // 1) Read live states
+        var gl = await _gitlab.GetSingleIssueBasicAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, ct);
+        var rm = await _redmine.GetSingleIssueBasicAsync(m.RedmineIssueId, ct);
+
+        var glJson = Serialize(gl);
+        var rmJson = Serialize(rm);
+
+        // 2) Load canonical
+        var canon = Deserialize(m.CanonicalSnapshotJson);
+
+        // 3) First-time init: if no canonical, choose GL (or RM), push to the other, then set canonical
+        if (canon is null)
+        {
+            // Pick GL as source of truth initially
+            await PatchRedmineFromGitLabAsync(p, m, gl, ct);
+            m.CanonicalSnapshotJson = glJson;
+            await _db.SaveChangesAsync(ct);
+            return;
+        }
+
+        var canonJson = Serialize(canon);
+
+        bool glEqualsCanon = string.Equals(glJson, canonJson, StringComparison.Ordinal);
+        bool rmEqualsCanon = string.Equals(rmJson, canonJson, StringComparison.Ordinal);
+
+        // 4) Cases
+        if (glEqualsCanon && rmEqualsCanon)
+        {
+            // nothing changed
+            return;
+        }
+
+        if (!glEqualsCanon && rmEqualsCanon)
+        {
+            // GL changed → push GL → RM
+            await PatchRedmineFromGitLabAsync(p, m, gl, ct);
+            m.CanonicalSnapshotJson = glJson; // now both sides mirror GL
+            await _db.SaveChangesAsync(ct);
+            return;
+        }
+
+        if (glEqualsCanon && !rmEqualsCanon)
+        {
+            // RM changed → push RM → GL
+            await PatchGitLabFromRedmineAsync(p, m, rm, ct);
+            m.CanonicalSnapshotJson = rmJson;
+            await _db.SaveChangesAsync(ct);
+            return;
+        }
+
+        // Both differ from canonical → merge by UpdatedAtUtc, then reconcile both sides to the winner
+        var winner = MergePerFieldByUpdated(gl, rm);
+
+        // Title
+        if (!string.Equals(gl.Title, winner.Title, StringComparison.Ordinal))
+            await _gitlab.UpdateIssueAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, title: winner.Title, ct: ct);
+        if (!string.Equals(rm.Title, winner.Title, StringComparison.Ordinal))
+            await _redmine.UpdateIssueAsync(m.RedmineIssueId, subject: winner.Title, ct: ct);
+
+        // Description
+        if (!string.Equals(gl.Description ?? "", winner.Description ?? "", StringComparison.Ordinal))
+            await _gitlab.UpdateIssueAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, description: winner.Description, ct: ct);
+        if (!string.Equals(rm.Description ?? "", winner.Description ?? "", StringComparison.Ordinal))
+            await _redmine.UpdateIssueAsync(m.RedmineIssueId, description: winner.Description, ct: ct);
+
+        // Due date
+        if (!Nullable.Equals(gl.DueDate, winner.DueDate))
+            await _gitlab.UpdateIssueAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, dueDate: winner.DueDate, ct: ct);
+        if (!Nullable.Equals(rm.DueDate, winner.DueDate))
+            await _redmine.UpdateIssueAsync(m.RedmineIssueId, dueDate: winner.DueDate, ct: ct);
+
+        // Assignee
+        if ((gl.AssigneeId ?? 0) != (winner.AssigneeId ?? 0))
+        {
+            int? glAssigneeId = winner.AssigneeId.HasValue
+                ? await _db.Users.Where(u => u.RedmineUserId == winner.AssigneeId.Value).Select(u => (int?)u.GitLabUserId).FirstOrDefaultAsync(ct)
+                : null;
+            await _gitlab.UpdateIssueAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, assigneeId: glAssigneeId, ct: ct);
+        }
+        if ((rm.AssigneeId ?? 0) != (winner.AssigneeId ?? 0))
+        {
+            int? rmAssigneeId = winner.AssigneeId.HasValue
+                ? await _db.Users.Where(u => u.GitLabUserId == winner.AssigneeId.Value).Select(u => (int?)u.RedmineUserId).FirstOrDefaultAsync(ct)
+                : null;
+            await _redmine.UpdateIssueAsync(m.RedmineIssueId, assigneeId: rmAssigneeId, ct: ct);
+        }
+
+        // Labels / Tracker
+        var glLabs = (gl.Labels ?? new()).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        var wiLabs = (winner.Labels ?? new()).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        if (!glLabs.SequenceEqual(wiLabs, StringComparer.OrdinalIgnoreCase))
+            await _gitlab.UpdateIssueAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, labels: winner.Labels, ct: ct);
+
+        var rmLabs = (rm.Labels ?? new()).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        if (!rmLabs.SequenceEqual(wiLabs, StringComparer.OrdinalIgnoreCase))
+        {
+            int? trackerId = null;
+            if (winner.Labels?.FirstOrDefault() is string trackerName)
+                trackerId = await _db.TrackersRedmine.Where(t => t.Name.ToLower() == trackerName.ToLower())
+                                                     .Select(t => (int?)t.RedmineTrackerId)
+                                                     .FirstOrDefaultAsync(ct);
+            await _redmine.UpdateIssueAsync(m.RedmineIssueId, trackerId: trackerId, ct: ct);
+        }
+
+        // Status
+        if (!string.Equals(gl.Status ?? "", winner.Status ?? "", StringComparison.OrdinalIgnoreCase))
+        {
+            var glState = string.Equals(winner.Status, "Closed", StringComparison.OrdinalIgnoreCase) ? "closed" : "opened";
+            await _gitlab.UpdateIssueAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, state: glState, ct: ct);
+        }
+        if (!string.Equals(rm.Status ?? "", winner.Status ?? "", StringComparison.OrdinalIgnoreCase))
+        {
+            int? statusId = string.Equals(winner.Status, "Closed", StringComparison.OrdinalIgnoreCase)
+                ? await _db.StatusesRedmine.Where(s => s.Name == "Closed").Select(s => (int?)s.RedmineStatusId).FirstOrDefaultAsync(ct)
+                : await _db.StatusesRedmine.Where(s => s.Name == "New").Select(s => (int?)s.RedmineStatusId).FirstOrDefaultAsync(ct);
+            await _redmine.UpdateIssueAsync(m.RedmineIssueId, statusId: statusId, ct: ct);
+        }
+
+        // 5) Set canonical to winner (now both sides mirror it)
+        m.CanonicalSnapshotJson = Serialize(winner);
+        await _db.SaveChangesAsync(ct);
+    }
+
+
 }
