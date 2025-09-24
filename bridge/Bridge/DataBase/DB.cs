@@ -10,6 +10,8 @@ public sealed class SyncDbContext : DbContext
     public DbSet<GitLabProject> GitLabProjects => Set<GitLabProject>();
     public DbSet<IssueMapping> IssueMappings => Set<IssueMapping>();
     public DbSet<User> Users => Set<User>();
+    public DbSet<TrackerRedmine> TrackersRedmine => Set<TrackerRedmine>();
+    public DbSet<StatusRedmine> StatusesRedmine => Set<StatusRedmine>();
     public SyncDbContext(DbContextOptions<SyncDbContext> options) : base(options) { }
 }
 
@@ -48,8 +50,12 @@ public sealed class IssueMapping
     public long GitLabIssueId { get; set; }
     [ForeignKey(nameof(ProjectSync))] public int ProjectSyncId { get; set; }
     public ProjectSync ProjectSync { get; set; } = null!;
-    public DateTimeOffset LastSyncedUtc { get; set; }
-    public string? Fingerprint { get; set; }
+
+    // NEW: single canonical snapshot (IssueBasic serialized to JSON)
+    public string? CanonicalSnapshotJson { get; set; }
+
+    // Optional: for webhook idempotency (GitLab Issues Hook)
+    public string? LastGitLabEventUuid { get; set; }
 }
 
 
@@ -65,4 +71,23 @@ public sealed class User
 
     public string? Username { get; set; }
 
+}
+
+[Index(nameof(RedmineTrackerId), IsUnique = true)]
+[Index(nameof(Name), IsUnique = true)]
+public sealed class TrackerRedmine
+{
+    [Key] public int Id { get; set; }                // PK in your own DB
+    [Required] public int RedmineTrackerId { get; set; }  // Redmine’s tracker id
+    [Required] public string Name { get; set; } = null!;
+}
+
+
+[Index(nameof(RedmineStatusId), IsUnique = true)]
+[Index(nameof(Name), IsUnique = true)]
+public sealed class StatusRedmine
+{
+    [Key] public int Id { get; set; }                 // PK
+    [Required] public int RedmineStatusId { get; set; }    // numeric id from Redmine
+    [Required] public string Name { get; set; } = "";      // e.g. "New", "In Progress", "Closed"
 }

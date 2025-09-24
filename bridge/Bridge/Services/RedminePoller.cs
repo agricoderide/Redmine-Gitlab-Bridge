@@ -1,23 +1,23 @@
-using Microsoft.Extensions.Logging;
-
-namespace Bridge.Services;
+using Bridge.Services;
 
 public sealed class RedminePoller : IRedminePoller
 {
-    private readonly RedmineClient _redmine;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<RedminePoller> _logger;
 
-    public RedminePoller(RedmineClient redmine, ILogger<RedminePoller> logger)
+    public RedminePoller(IServiceScopeFactory scopeFactory, ILogger<RedminePoller> logger)
     {
-        _redmine = redmine;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
     public async Task PollOnceAsync(CancellationToken ct = default)
     {
-        // TODO: replace with: fetch updated issues since last watermark, route, write to GitLab, etc.
-        var (ok, msg) = await _redmine.PingAsync(ct);
-        if (!ok) throw new InvalidOperationException($"Redmine ping failed: {msg}");
-        _logger.LogInformation("Redmine poll OK: {Msg}", msg);
+        var started = DateTimeOffset.UtcNow;
+        using var scope = _scopeFactory.CreateScope();
+        var sync = scope.ServiceProvider.GetRequiredService<SyncService>();
+        await sync.RunOnceAsync(ct);
+        _logger.LogInformation("Poll pass completed in {ms} ms",
+            (DateTimeOffset.UtcNow - started).TotalMilliseconds);
     }
 }

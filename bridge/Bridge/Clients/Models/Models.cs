@@ -14,7 +14,12 @@ public sealed record IssueBasic(
     int? RedmineId,
     long? GitLabIid,
     string Title,
-    string? Description
+    string? Description,
+    List<string>? Labels,
+    int? AssigneeId = null,
+    DateTime? DueDate = null,
+    string? Status = null,
+    DateTimeOffset? UpdatedAtUtc = null
 );
 
 

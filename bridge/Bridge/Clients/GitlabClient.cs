@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Bridge.Contracts;
@@ -101,7 +102,7 @@ public sealed class GitLabClient
             var desc = e.TryGetProperty("description", out var d) ? d.GetString() : null;
 
             bool hasTracker = false;
-
+            string? label = null;
             if (e.TryGetProperty("labels", out var labs) && labs.ValueKind == JsonValueKind.Array)
             {
                 var trackerSet = new HashSet<string>(_trackers, StringComparer.OrdinalIgnoreCase);
@@ -114,15 +115,29 @@ public sealed class GitLabClient
                         if (!string.IsNullOrWhiteSpace(val) && trackerSet.Contains(val))
                         {
                             hasTracker = true;
+                            label = val;
                             break; // one match is enough
                         }
                     }
                 }
             }
 
-            if (hasTracker)
+            var dueDate = e.TryGetProperty("due_date", out var dd) && dd.ValueKind == JsonValueKind.String
+                ? DateTime.Parse(dd.GetString()!)
+                : (DateTime?)null;
+
+            var state = e.TryGetProperty("state", out var st) ? st.GetString() : null;
+
+            if (hasTracker && label != null)
             {
-                list.Add(new IssueBasic(null, iid, title, desc));
+                int? gitLabAssigneeId = null;
+                if (e.TryGetProperty("assignees", out var assignees) && assignees.ValueKind == JsonValueKind.Array)
+                {
+                    var first = assignees.EnumerateArray().FirstOrDefault();
+                    if (first.ValueKind == JsonValueKind.Object && first.TryGetProperty("id", out var aid))
+                        gitLabAssigneeId = aid.GetInt32();
+                }
+                list.Add(new IssueBasic(null, iid, title, desc, new List<string>() { label }, gitLabAssigneeId, dueDate, Status: state));
             }
         }
         return list;
@@ -143,10 +158,37 @@ public sealed class GitLabClient
         long projectId,
         string title,
         string? description = null,
+        IEnumerable<string>? labels = null,
+        int? assigneeId = null,
+        string? sourceUrl = null,
+        DateTime? dueDate = null,
+string? state = null,
         CancellationToken ct = default)
     {
-        var payload = new Dictionary<string, string> { ["title"] = title };
-        if (!string.IsNullOrWhiteSpace(description)) payload["description"] = description;
+        var fullDesc = new StringBuilder();
+        if (!string.IsNullOrEmpty(sourceUrl))
+        {
+            fullDesc.AppendLine($"🔗 Source: {sourceUrl}");
+            fullDesc.AppendLine("---");
+        }
+        if (!string.IsNullOrEmpty(description))
+            fullDesc.AppendLine(description);
+
+        var payload = new Dictionary<string, string?>
+        {
+            ["title"] = title,
+            ["description"] = fullDesc.ToString(),
+            ["due_date"] = dueDate?.ToString("yyyy-MM-dd")
+
+        };
+
+        if (labels != null)
+            payload["labels"] = string.Join(",", labels);
+
+        if (assigneeId.HasValue)
+            payload["assignee_ids"] = assigneeId.Value.ToString();
+
+
 
         using var content = new FormUrlEncodedContent(payload);
         var resp = await _http.PostAsync($"projects/{projectId}/issues", content, ct);
@@ -158,10 +200,32 @@ public sealed class GitLabClient
         using var doc = JsonDocument.Parse(body);
         var iid = doc.RootElement.GetProperty("iid").GetInt64();
 
+        // 4) Close it afterwards if requested
+        if (string.Equals(state, "closed", StringComparison.OrdinalIgnoreCase))
+        {
+            var closeOk = await CloseIssueAsync(projectId, iid, ct);
+            if (!closeOk)
+                return (true, iid, "created (but failed to close)");
+        }
+
+
         return (true, iid, "created");
     }
 
 
+
+    // helper: PUT state_event=close
+    public async Task<bool> CloseIssueAsync(long projectId, long issueIid, CancellationToken ct = default)
+    {
+        var payload = new { state_event = "close" };
+        using var content = new StringContent(
+            System.Text.Json.JsonSerializer.Serialize(payload),
+            Encoding.UTF8,
+            "application/json"
+        );
+        var resp = await _http.PutAsync($"/api/v4/projects/{projectId}/issues/{issueIid}", content, ct);
+        return resp.IsSuccessStatusCode;
+    }
 
     // GitLab: project members (includes inherited members)
     public async Task<List<GlMember>> GetGitLabProjectMembersAsync(int projectId, CancellationToken ct = default)

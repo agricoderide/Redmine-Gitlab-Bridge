@@ -3,6 +3,7 @@ using System;
 using Bridge.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Bridge.Migrations
 {
     [DbContext(typeof(SyncDbContext))]
-    partial class SyncDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250923111235_addtrackertables")]
+    partial class addtrackertables
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.9");
@@ -51,13 +54,13 @@ namespace Bridge.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("CanonicalSnapshotJson")
+                    b.Property<string>("Fingerprint")
                         .HasColumnType("TEXT");
 
                     b.Property<long>("GitLabIssueId")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("LastGitLabEventUuid")
+                    b.Property<DateTimeOffset>("LastSyncedUtc")
                         .HasColumnType("TEXT");
 
                     b.Property<int>("ProjectSyncId")
@@ -101,30 +104,6 @@ namespace Bridge.Migrations
                         .IsUnique();
 
                     b.ToTable("Projects");
-                });
-
-            modelBuilder.Entity("Bridge.Data.StatusRedmine", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("RedmineStatusId")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Name")
-                        .IsUnique();
-
-                    b.HasIndex("RedmineStatusId")
-                        .IsUnique();
-
-                    b.ToTable("StatusesRedmine");
                 });
 
             modelBuilder.Entity("Bridge.Data.TrackerRedmine", b =>

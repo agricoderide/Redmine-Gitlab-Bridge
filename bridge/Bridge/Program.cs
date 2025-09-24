@@ -27,6 +27,9 @@ public sealed class Program
         // Bind strongly-typed options from configuration for DI
         builder.Services.Configure<RedmineOptions>(builder.Configuration.GetSection(RedmineOptions.SectionName));
         builder.Services.Configure<GitLabOptions>(builder.Configuration.GetSection(GitLabOptions.SectionName));
+        builder.Services.Configure<TrackersKeys>(builder.Configuration.GetSection("Trackers"));
+        builder.Services.Configure<RedminePollingOptions>(builder.Configuration.GetSection("Polling:Redmine"));
+
 
         // Resilience policy for outbound HTTP calls (exponential backoff + jitter)
         static IAsyncPolicy<HttpResponseMessage> RetryPolicy() =>
@@ -37,17 +40,17 @@ public sealed class Program
                     attempt => TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt))
                               + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 250)));
 
-        builder.Services.Configure<TrackersKeys>(builder.Configuration.GetSection("Trackers"));
+
 
         // Typed HttpClients for external services, using the above retry policy
         builder.Services.AddHttpClient<RedmineClient>().AddPolicyHandler(RetryPolicy());
         builder.Services.AddHttpClient<GitLabClient>().AddPolicyHandler(RetryPolicy());
 
         // Redmine polling configuration + background services
-        builder.Services.Configure<RedminePollingOptions>(
-            builder.Configuration.GetSection("Polling:Redmine"));
 
+        builder.Services.AddScoped<SyncService>();
         builder.Services.AddSingleton<IRedminePoller, RedminePoller>();
+
         builder.Services.AddHostedService<RedminePollingWorker>();
 
         // Health checks and Swagger/OpenAPI generator
@@ -62,8 +65,6 @@ public sealed class Program
                        ?? "Data Source=bridge.db"; // SQLite for dev
             options.UseSqlite(conn);
         });
-        // Database seeding util
-        builder.Services.AddScoped<DbSeeder>();
 
 
 
@@ -82,23 +83,13 @@ public sealed class Program
             ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
         });
 
-        // Run startup seeding inside a scope
-        using (var scope = app.Services.CreateScope())
-        {
-            var seeder = scope.ServiceProvider.GetRequiredService<DbSeeder>();
-            await seeder.SeedAsync();
-        }
+
 
 
 
         // Health
         app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-        app.MapPost("/admin/seed", async (DbSeeder seeder, CancellationToken ct) =>
-        {
-            await seeder.SeedAsync(ct);
-            return Results.Ok(new { seeded = true });
-        });
         // Dev pings
         app.MapGet("/dev/redmine/ping", async (RedmineClient client, CancellationToken ct) =>
         {

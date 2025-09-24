@@ -2,9 +2,11 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Bridge.Contracts;
+using Bridge.Data;
 using Bridge.Infrastructure.Options;
+using GitLabApiClient.Models;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using Redmine.Net.Api.Types;
 
 namespace Bridge.Services;
 
@@ -18,14 +20,15 @@ public sealed class RedmineClient
     private readonly HttpClient _http;
     public readonly RedmineOptions _opt;
     public readonly TrackersKeys _trackers;
+    private readonly IServiceScopeFactory _scopeFactory;
 
-    public RedmineClient(HttpClient http, IOptions<RedmineOptions> opt, IOptions<TrackersKeys> trackers)
+    public RedmineClient(HttpClient http, IServiceScopeFactory scopeFactory, IOptions<RedmineOptions> opt, IOptions<TrackersKeys> trackers)
     {
         _http = http;
         _opt = opt.Value;
+        _scopeFactory = scopeFactory;
 
         _trackers = trackers.Value;
-
         _http.BaseAddress = new Uri(_opt.BaseUrl.TrimEnd('/') + "/");
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
@@ -137,11 +140,52 @@ public sealed class RedmineClient
             if (tracker == null || !_trackers.ConvertAll(d => d.ToLower()).Contains(tracker.ToLower()))
                 continue;
 
+            var assigneeId = it.TryGetProperty("assigned_to", out var at)
+    ? at.TryGetProperty("id", out var aid) ? aid.GetInt32() : (int?)null
+    : null;
 
-            list.Add(new IssueBasic(id, null, title, desc));
+            var status = it.TryGetProperty("status", out var st) && st.TryGetProperty("name", out var sn)
+                ? sn.GetString()
+                : null;
+
+
+
+            var dueDate = it.TryGetProperty("due_date", out var dd) && dd.ValueKind == JsonValueKind.String
+            ? DateTime.Parse(dd.GetString()!)
+            : (DateTime?)null;
+
+            list.Add(new IssueBasic(id, null, title, desc, new List<string>() { tracker }, AssigneeId: assigneeId, dueDate, Status: status));
         }
         return list;
 
+    }
+
+
+    // in RedmineClient.cs
+    public async Task SyncGlobalStatusesAsync(CancellationToken ct = default)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<SyncDbContext>();
+
+        var resp = await _http.GetAsync("issue_statuses.json", ct);
+        resp.EnsureSuccessStatusCode();
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        foreach (var s in doc.RootElement.GetProperty("issue_statuses").EnumerateArray())
+        {
+            var sid = s.GetProperty("id").GetInt32();
+            var name = s.GetProperty("name").GetString() ?? "";
+
+            var existing = await db.StatusesRedmine
+                .FirstOrDefaultAsync(x => x.RedmineStatusId == sid, ct);
+
+            if (existing is null)
+                db.StatusesRedmine.Add(new StatusRedmine { RedmineStatusId = sid, Name = name });
+            else
+                existing.Name = name; // keep name fresh if renamed
+        }
+
+        await db.SaveChangesAsync(ct);
     }
 
 
@@ -150,16 +194,45 @@ public sealed class RedmineClient
         string projectIdOrKey,
         string subject,
         string? description = null,
+            int? trackerId = null,
+            int? assigneeId = null,
+            string? sourceUrl = null,
+            DateTime? dueDate = null,
+            int? statusId = null,
         CancellationToken ct = default) // <- seeder passes Feature/Bug id here
     {
+
+        var fullDesc = new StringBuilder();
+        if (!string.IsNullOrEmpty(sourceUrl))
+        {
+            fullDesc.AppendLine($"🔗 Source: {sourceUrl}");
+            fullDesc.AppendLine("---");
+        }
+        if (!string.IsNullOrEmpty(description))
+            fullDesc.AppendLine(description);
+
         var issue = new Dictionary<string, object?>
         {
             ["project_id"] = projectIdOrKey,
             ["subject"] = subject,
-            ["description"] = description
+            ["description"] = fullDesc.ToString(),
+            ["due_date"] = dueDate?.ToString("yyyy-MM-dd")
+
         };
+        if (statusId.HasValue)
+            issue["status_id"] = statusId.Value;
+
+        if (trackerId.HasValue)
+            issue["tracker_id"] = trackerId.Value;
+
+        if (assigneeId.HasValue)
+            issue["assigned_to_id"] = assigneeId.Value;
 
         using var content = new StringContent(JsonSerializer.Serialize(new { issue }), Encoding.UTF8, "application/json");
+        // _log.LogInformation("Creating issue in Redmine: {Json}", JsonSerializer.Serialize(new { issue }));
+        // foreach (var h in _http.DefaultRequestHeaders)
+        //     _log.LogInformation("Header {Key}: {Val}", h.Key, string.Join(",", h.Value));
+
         var resp = await _http.PostAsync("issues.json", content, ct);
         var body = await resp.Content.ReadAsStringAsync(ct);
         if (!resp.IsSuccessStatusCode) return (false, 0, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {body}");
@@ -170,6 +243,33 @@ public sealed class RedmineClient
         return (false, 0, "Could not parse Redmine create issue response");
     }
 
+
+
+    public async Task SyncGlobalTrackersAsync(CancellationToken ct = default)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<SyncDbContext>();
+
+        var resp = await _http.GetAsync("trackers.json", ct);
+        resp.EnsureSuccessStatusCode();
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        var arr = doc.RootElement.GetProperty("trackers").EnumerateArray();
+
+        foreach (var t in arr)
+        {
+            var rid = t.GetProperty("id").GetInt32();
+            var name = t.GetProperty("name").GetString() ?? "";
+
+            var existing = await db.TrackersRedmine.FirstOrDefaultAsync(x => x.RedmineTrackerId == rid, ct);
+            if (existing is null)
+                db.TrackersRedmine.Add(new TrackerRedmine { RedmineTrackerId = rid, Name = name });
+            else
+                existing.Name = name;
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
 
 
 
