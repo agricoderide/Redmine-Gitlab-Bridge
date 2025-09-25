@@ -163,4 +163,29 @@ public sealed partial class SyncService
         );
         if (!ok) _log.LogWarning("GL update failed !{Gl}: {Msg}", gitLabIid, msg);
     }
+
+    private async Task<int?> ToRedmineAssigneeAsync(int? gitLabAssigneeId, CancellationToken ct)
+    {
+        if (!gitLabAssigneeId.HasValue) return null;
+        return await _db.Users
+            .Where(u => u.GitLabUserId == gitLabAssigneeId.Value)
+            .Select(u => (int?)u.RedmineUserId)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    private async Task<int?> ToGitLabAssigneeAsync(int? redmineAssigneeId, CancellationToken ct)
+    {
+        if (!redmineAssigneeId.HasValue) return null;
+        return await _db.Users
+            .Where(u => u.RedmineUserId == redmineAssigneeId.Value)
+            .Select(u => (int?)u.GitLabUserId)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    private static string? MapGitLabStateFromRedmine(string? rmStatus)
+    {
+        if (string.IsNullOrWhiteSpace(rmStatus)) return null;
+        return string.Equals(rmStatus, "Closed", StringComparison.OrdinalIgnoreCase) ? "closed" : "opened";
+    }
+
 }

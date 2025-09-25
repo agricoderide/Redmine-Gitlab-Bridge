@@ -24,122 +24,6 @@ public sealed partial class SyncService
         }
     }
 
-    private static string? MapGitLabStateFromRedmine(string? rmStatus)
-    {
-        if (string.IsNullOrWhiteSpace(rmStatus)) return null;
-        return string.Equals(rmStatus, "Closed", StringComparison.OrdinalIgnoreCase) ? "closed" : "opened";
-    }
-
-    private async Task<int?> ToRedmineAssigneeAsync(int? gitLabAssigneeId, CancellationToken ct)
-    {
-        if (!gitLabAssigneeId.HasValue) return null;
-        return await _db.Users
-            .Where(u => u.GitLabUserId == gitLabAssigneeId.Value)
-            .Select(u => (int?)u.RedmineUserId)
-            .FirstOrDefaultAsync(ct);
-    }
-
-    private async Task<int?> ToGitLabAssigneeAsync(int? redmineAssigneeId, CancellationToken ct)
-    {
-        if (!redmineAssigneeId.HasValue) return null;
-        return await _db.Users
-            .Where(u => u.RedmineUserId == redmineAssigneeId.Value)
-            .Select(u => (int?)u.GitLabUserId)
-            .FirstOrDefaultAsync(ct);
-    }
-
-    private async Task SeedMappingsByTitleAsync(
-        ProjectSync p,
-        long glId,
-        List<IssueBasic> rmIssues,
-        List<IssueBasic> glIssues,
-        HashSet<int> mappedRm,
-        HashSet<long> mappedGl,
-        CancellationToken ct)
-    {
-        var glByTitle = glIssues
-            .Where(i => !string.IsNullOrWhiteSpace(i.Title))
-            .GroupBy(i => i.Title.Trim(), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
-
-        foreach (var rmi in rmIssues)
-        {
-            if (rmi.RedmineId is not int rmId || mappedRm.Contains(rmId)) continue;
-            var title = rmi.Title?.Trim();
-            if (string.IsNullOrEmpty(title)) continue;
-
-            if (!glByTitle.TryGetValue(title, out var cands) || cands.Count != 1) continue;
-
-            var gl = cands[0];
-            if (gl.GitLabIid is not long giid || mappedGl.Contains(giid)) continue;
-
-            var mapping = new IssueMapping
-            {
-                ProjectSyncId = p.Id,
-                RedmineIssueId = rmId,
-                GitLabIssueId = giid,
-            };
-            _db.IssueMappings.Add(mapping);
-
-            var glCurrent = await _gitlab.GetSingleIssueBasicAsync(glId, giid, ct);
-            await PatchRedmineFromGitLabAsync(p, mapping, glCurrent, ct);
-            mapping.CanonicalSnapshot = glCurrent;
-
-            mappedRm.Add(rmId);
-            mappedGl.Add(giid);
-        }
-    }
-
-    private async Task CreateMissingFromRedmineAsync(
-        ProjectSync p,
-        long glId,
-        List<IssueBasic> rmIssues,
-        HashSet<int> mappedRm,
-        HashSet<long> mappedGl,
-        CancellationToken ct)
-    {
-        foreach (var rmi in rmIssues)
-        {
-            await CreateGitLabFromRedmineAsync(p, glId, rmi, mappedRm, mappedGl, ct);
-        }
-    }
-
-    private async Task CreateMissingFromGitLabAsync(
-        ProjectSync p,
-        List<IssueBasic> glIssues,
-        HashSet<int> mappedRm,
-        HashSet<long> mappedGl,
-        CancellationToken ct)
-    {
-        foreach (var gli in glIssues)
-        {
-            await CreateRedmineFromGitLabAsync(p, gli, mappedRm, mappedGl, ct);
-        }
-    }
-
-    private async Task ReconcileMappingsAsync(
-        ProjectSync p,
-        List<IssueBasic> rmIssues,
-        List<IssueBasic> glIssues,
-        CancellationToken ct)
-    {
-        var glByIid = glIssues.Where(x => x.GitLabIid.HasValue)
-                              .ToDictionary(i => i.GitLabIid!.Value, i => i);
-        var rmById = rmIssues.Where(x => x.RedmineId.HasValue)
-                              .ToDictionary(i => i.RedmineId!.Value, i => i);
-
-        var mappings = await _db.IssueMappings
-            .Where(m => m.ProjectSyncId == p.Id)
-            .ToListAsync(ct);
-
-        foreach (var m in mappings)
-        {
-            glByIid.TryGetValue(m.GitLabIssueId, out var glHint);
-            rmById.TryGetValue(m.RedmineIssueId, out var rmHint);
-            await ProcessPairByCanonicalAsync(p, m, ct, glHint, rmHint);
-        }
-    }
-
     public static string ExtractSearchKey(string username)
     {
         if (string.IsNullOrWhiteSpace(username)) return "";
@@ -169,7 +53,6 @@ public sealed partial class SyncService
         return Convert.ToHexString(hash);
     }
 
-    // ---- normalization & equality ---------------------------------------------
     private static IReadOnlyList<string> NormalizeLabels(List<string>? labels) =>
         (labels ?? new()).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
 

@@ -165,4 +165,57 @@ public sealed partial class SyncService
         mappedRm.Add(rmId);
         mappedGl.Add(newIid);
     }
+
+    private async Task SeedMappingsByTitleAsync(ProjectSync p, long glId, List<IssueBasic> rmIssues, List<IssueBasic> glIssues, HashSet<int> mappedRm, HashSet<long> mappedGl, CancellationToken ct)
+    {
+        var glByTitle = glIssues
+            .Where(i => !string.IsNullOrWhiteSpace(i.Title))
+            .GroupBy(i => i.Title.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var rmi in rmIssues)
+        {
+            if (rmi.RedmineId is not int rmId || mappedRm.Contains(rmId)) continue;
+            var title = rmi.Title?.Trim();
+            if (string.IsNullOrEmpty(title)) continue;
+
+            if (!glByTitle.TryGetValue(title, out var cands) || cands.Count != 1) continue;
+
+            var gl = cands[0];
+            if (gl.GitLabIid is not long giid || mappedGl.Contains(giid)) continue;
+
+            var mapping = new IssueMapping
+            {
+                ProjectSyncId = p.Id,
+                RedmineIssueId = rmId,
+                GitLabIssueId = giid,
+            };
+            _db.IssueMappings.Add(mapping);
+
+            var glCurrent = await _gitlab.GetSingleIssueBasicAsync(glId, giid, ct);
+            await PatchRedmineFromGitLabAsync(p, mapping, glCurrent, ct);
+            mapping.CanonicalSnapshot = glCurrent;
+
+            mappedRm.Add(rmId);
+            mappedGl.Add(giid);
+        }
+    }
+
+    private async Task CreateMissingFromRedmineAsync(ProjectSync p, long glId, List<IssueBasic> rmIssues, HashSet<int> mappedRm, HashSet<long> mappedGl, CancellationToken ct)
+    {
+        foreach (var rmi in rmIssues)
+        {
+            await CreateGitLabFromRedmineAsync(p, glId, rmi, mappedRm, mappedGl, ct);
+        }
+    }
+
+    private async Task CreateMissingFromGitLabAsync(ProjectSync p, List<IssueBasic> glIssues, HashSet<int> mappedRm, HashSet<long> mappedGl, CancellationToken ct)
+    {
+        foreach (var gli in glIssues)
+        {
+            await CreateRedmineFromGitLabAsync(p, gli, mappedRm, mappedGl, ct);
+        }
+    }
+
+
 }
