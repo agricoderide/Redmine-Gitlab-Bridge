@@ -8,9 +8,7 @@ using Microsoft.Extensions.Options;
 
 namespace Bridge.Services;
 
-/// <summary>
-/// Typed GitLab API client (v4). Returns runtime-ready DTOs.
-/// </summary>
+
 public sealed class GitLabClient
 {
     public record GlMember(int Id, string Username, string Name);
@@ -166,13 +164,24 @@ string? state = null,
         CancellationToken ct = default)
     {
         var fullDesc = new StringBuilder();
+        // remove existing "Source:" if it’s the first line
+        var cleanDesc = description ?? "";
+        var lines = cleanDesc.Split('\n').ToList();
+        if (lines.Count > 0 && lines[0].TrimStart().StartsWith("Source:", StringComparison.OrdinalIgnoreCase))
+        {
+            lines.RemoveAt(0);
+            cleanDesc = string.Join('\n', lines);
+        }
+
+        // now prepend the new Source if provided
         if (!string.IsNullOrEmpty(sourceUrl))
         {
-            fullDesc.AppendLine($"🔗 Source: {sourceUrl}");
-            fullDesc.AppendLine("---");
+            fullDesc.AppendLine($"Source: {sourceUrl}");
+            fullDesc.AppendLine(); // blank line for spacing
         }
-        if (!string.IsNullOrEmpty(description))
-            fullDesc.AppendLine(description);
+
+        if (!string.IsNullOrEmpty(cleanDesc))
+            fullDesc.AppendLine(cleanDesc);
 
         var payload = new Dictionary<string, string?>
         {
@@ -322,11 +331,7 @@ string? state = null,
 
 
 
-    // -------------
-    // Helpers
-    // -------------
-    private static string? TryGetString(JsonElement e, string name) =>
-        e.TryGetProperty(name, out var v) ? v.GetString() : null;
+
 
     static readonly Regex ProjectOrGroupBotRx =
     new(@"^(project|group)_[0-9]+_bot($|_)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);

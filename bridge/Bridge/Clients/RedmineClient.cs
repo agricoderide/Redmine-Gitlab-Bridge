@@ -203,13 +203,24 @@ public sealed class RedmineClient
     {
 
         var fullDesc = new StringBuilder();
+        // remove existing "Source:" if it’s the first line
+        var cleanDesc = description ?? "";
+        var lines = cleanDesc.Split('\n').ToList();
+        if (lines.Count > 0 && lines[0].TrimStart().StartsWith("Source:", StringComparison.OrdinalIgnoreCase))
+        {
+            lines.RemoveAt(0);
+            cleanDesc = string.Join('\n', lines);
+        }
+
+        // now prepend the new Source if provided
         if (!string.IsNullOrEmpty(sourceUrl))
         {
-            fullDesc.AppendLine($"🔗 Source: {sourceUrl}");
-            fullDesc.AppendLine("---");
+            fullDesc.AppendLine($"Source: {sourceUrl}");
+            fullDesc.AppendLine(); // blank line for spacing
         }
-        if (!string.IsNullOrEmpty(description))
-            fullDesc.AppendLine(description);
+
+        if (!string.IsNullOrEmpty(cleanDesc))
+            fullDesc.AppendLine(cleanDesc);
 
         var issue = new Dictionary<string, object?>
         {

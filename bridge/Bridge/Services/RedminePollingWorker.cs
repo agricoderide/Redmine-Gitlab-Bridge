@@ -3,12 +3,14 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Bridge.Infrastructure.Options;
+using Bridge.Services; // for SyncService
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Bridge.Services;
 
 public sealed class RedminePollingWorker : BackgroundService
 {
-    private readonly IRedminePoller _poller;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly IOptionsMonitor<RedminePollingOptions> _opts;
     private readonly ILogger<RedminePollingWorker> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -17,19 +19,20 @@ public sealed class RedminePollingWorker : BackgroundService
     public static DateTimeOffset? LastSuccessUtc { get; private set; }
     public static int ConsecutiveFailures { get; private set; }
 
-    public RedminePollingWorker(IRedminePoller poller, IOptionsMonitor<RedminePollingOptions> opts, ILogger<RedminePollingWorker> logger)
+    public RedminePollingWorker(
+        IServiceScopeFactory scopeFactory,
+        IOptionsMonitor<RedminePollingOptions> opts,
+        ILogger<RedminePollingWorker> logger)
     {
-        _poller = poller;
+        _scopeFactory = scopeFactory;
         _opts = opts;
         _logger = logger;
     }
 
-    // Just a timer that keeps on running after a certain time given by the configuration file.
-
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Redmine polling worker starting…");
+
         while (!stoppingToken.IsCancellationRequested)
         {
             var cfg = _opts.CurrentValue;
@@ -44,14 +47,15 @@ public sealed class RedminePollingWorker : BackgroundService
 
             try
             {
-                // prevent overlap if one run takes longer than the interval
                 if (await _gate.WaitAsync(TimeSpan.Zero, stoppingToken))
                 {
                     try
                     {
                         LastRunUtc = DateTimeOffset.UtcNow;
                         var sw = Stopwatch.StartNew();
-                        await _poller.PollOnceAsync(stoppingToken); // go grabs something from there
+
+                        await PollOnceAsync(stoppingToken);
+
                         sw.Stop();
                         LastSuccessUtc = DateTimeOffset.UtcNow;
                         ConsecutiveFailures = 0;
@@ -67,7 +71,10 @@ public sealed class RedminePollingWorker : BackgroundService
                     _logger.LogWarning("Previous poll still running; skipping this tick.");
                 }
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // graceful shutdown
+            }
             catch (Exception ex)
             {
                 ConsecutiveFailures++;
@@ -78,9 +85,21 @@ public sealed class RedminePollingWorker : BackgroundService
             {
                 await Task.Delay(interval + jitter, stoppingToken);
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException) { /* shutdown */ }
         }
 
         _logger.LogInformation("Redmine polling worker stopping.");
+    }
+
+    private async Task PollOnceAsync(CancellationToken ct)
+    {
+        var started = DateTimeOffset.UtcNow;
+        using var scope = _scopeFactory.CreateScope();
+
+        var sync = scope.ServiceProvider.GetRequiredService<SyncService>();
+        await sync.RunOnceAsync(ct);
+
+        _logger.LogInformation("Poll pass completed in {ms} ms",
+            (DateTimeOffset.UtcNow - started).TotalMilliseconds);
     }
 }

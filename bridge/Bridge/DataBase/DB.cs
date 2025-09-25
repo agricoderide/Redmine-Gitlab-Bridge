@@ -1,3 +1,4 @@
+using Bridge.Contracts;
 using Microsoft.EntityFrameworkCore;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -13,6 +14,28 @@ public sealed class SyncDbContext : DbContext
     public DbSet<TrackerRedmine> TrackersRedmine => Set<TrackerRedmine>();
     public DbSet<StatusRedmine> StatusesRedmine => Set<StatusRedmine>();
     public SyncDbContext(DbContextOptions<SyncDbContext> options) : base(options) { }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Deterministic JSON for IssueBasic
+        var jsonOptions = new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            WriteIndented = false,
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never
+        };
+
+        var converter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<IssueBasic?, string?>(
+            v => v == null ? null : System.Text.Json.JsonSerializer.Serialize(v, jsonOptions),
+            v => string.IsNullOrWhiteSpace(v) ? null : System.Text.Json.JsonSerializer.Deserialize<IssueBasic>(v!, jsonOptions)
+        );
+
+        modelBuilder.Entity<IssueMapping>()
+            .Property(m => m.CanonicalSnapshot)
+            .HasConversion(converter);
+
+        base.OnModelCreating(modelBuilder);
+    }
 }
 
 
@@ -52,7 +75,7 @@ public sealed class IssueMapping
     public ProjectSync ProjectSync { get; set; } = null!;
 
     // NEW: single canonical snapshot (IssueBasic serialized to JSON)
-    public string? CanonicalSnapshotJson { get; set; }
+    public IssueBasic? CanonicalSnapshot { get; set; }
 
     // Optional: for webhook idempotency (GitLab Issues Hook)
     public string? LastGitLabEventUuid { get; set; }

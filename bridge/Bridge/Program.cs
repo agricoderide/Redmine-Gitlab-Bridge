@@ -3,6 +3,7 @@
 // reverse-proxy headers, and minimal API endpoints.
 using System.Net;
 using System.Text.Json;
+using Bridge.Contracts;
 using Bridge.Data;
 using Bridge.Infrastructure.Options;
 using Bridge.Services;
@@ -49,7 +50,6 @@ public sealed class Program
         // Redmine polling configuration + background services
 
         builder.Services.AddScoped<SyncService>();
-        builder.Services.AddSingleton<IRedminePoller, RedminePoller>();
 
         builder.Services.AddHostedService<RedminePollingWorker>();
 
@@ -87,19 +87,14 @@ public sealed class Program
 
 
 
-        // Health
         app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-        // Dev pings
         app.MapGet("/dev/redmine/ping", async (RedmineClient client, CancellationToken ct) =>
         {
             var (ok, msg) = await client.PingAsync(ct);
             return ok ? Results.Ok(new { ok, msg }) : Results.Problem(msg, statusCode: 502);
         });
 
-
-
-        // Background polling status snapshot
         app.MapGet("/dev/redmine/poll/status", () =>
         {
             return Results.Ok(new
@@ -112,37 +107,12 @@ public sealed class Program
 
         });
 
-
-        // Trigger a single poll cycle (manual)
-        app.MapPost("/dev/redmine/poll-once", async (IRedminePoller poller, CancellationToken ct) =>
-        {
-            await poller.PollOnceAsync(ct);
-            return Results.Ok(new { ok = true });
-        });
-
         app.MapGet("/dev/gitlab/ping", async (GitLabClient client, CancellationToken ct) =>
         {
             var (ok, msg) = await client.PingAsync(ct);
             return ok ? Results.Ok(new { ok, msg }) : Results.Problem(msg, statusCode: 502);
         });
 
-        // GitLab webhook (validates shared secret via X-Gitlab-Token)
-        app.MapPost("/webhooks/gitlab", async (HttpRequest req, IConfiguration cfg) =>
-        {
-            var secret = cfg.GetSection(GitLabOptions.SectionName)["WebhookSecret"] ?? "";
-            if (string.IsNullOrWhiteSpace(secret))
-                return Results.Problem("Webhook secret not configured", statusCode: 500);
-
-            if (!req.Headers.TryGetValue("X-Gitlab-Token", out var token) || token != secret)
-                return Results.Unauthorized();
-
-            var eventName = req.Headers["X-Gitlab-Event"].ToString();
-            using var reader = new StreamReader(req.Body);
-            var body = await reader.ReadToEndAsync();
-            app.Logger.LogInformation("GitLab webhook received: {Event} len={Len}", eventName, body.Length);
-
-            return Results.Ok(new { received = true, eventName, length = body.Length });
-        });
 
         app.Run();
     }
