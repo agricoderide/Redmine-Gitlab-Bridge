@@ -1,68 +1,12 @@
-services:
-  redmine-db:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: redmine
-      POSTGRES_PASSWORD: redmine
-      POSTGRES_DB: redmine
-    volumes:
-      - redmine-db-data:/var/lib/postgresql/data
-    restart: unless-stopped
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
-  redmine:
-    image: redmine:6.0.6-bookworm
-    depends_on: [redmine-db]
-    environment:
-      REDMINE_DB_POSTGRES: redmine-db
-      REDMINE_DB_DATABASE: redmine
-      REDMINE_DB_USERNAME: redmine
-      REDMINE_DB_PASSWORD: redmine
-      REDMINE_SECRET_KEY_BASE: changeme
-    ports:
-      - "3000:3000"           # http://localhost:3000
-    volumes:
-      - redmine-files:/usr/src/redmine/files
-      - redmine-plugins:/usr/src/redmine/plugins
-      - redmine-themes:/usr/src/redmine/public/themes
-    restart: unless-stopped
-
-  gitlab:
-    image: gitlab/gitlab-ce:18.3.0-ce.0
-    hostname: gitlab.local
-    environment:
-      GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD}
-      GITLAB_ROOT_EMAIL: ${GITLAB_ROOT_EMAIL}
-      TZ: ${TZ}
-    shm_size: "1g"
-    ports:
-      - "12345:80"             # http://localhost:8080
-      # - "2222:22"             # SSH
-    volumes:
-      - gitlab-config:/etc/gitlab
-      - gitlab-logs:/var/log/gitlab
-      - gitlab-data:/var/opt/gitlab
-    restart: unless-stopped
-
-  # bridge:
-  #   build:
-  #     context: ./bridge
-  #   environment:
-  #     # Filled via .env (see .env.example)
-  #     REDMINE_URL: ${REDMINE_URL}
-  #     REDMINE_API_KEY: ${REDMINE_API_KEY}
-  #     REDMINE_WEBHOOK_SECRET: ${REDMINE_WEBHOOK_SECRET}
-  #     GITLAB_URL: ${GITLAB_URL}
-  #     GITLAB_TOKEN: ${GITLAB_TOKEN}
-  #     GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET}
-  #     MIRROR_STRATEGY: ${MIRROR_STRATEGY}
-  #     MAPPING_PATH: /app/mapping.json
-  #     LOG_LEVEL: ${LOG_LEVEL}
-  #   volumes:
-  #     - ./bridge/mapping.example.json:/app/mapping.json:ro
-  #   ports:
-  #     - "5001:5001"           # http://localhost:5001/health
-  #   depends_on: [redmine, gitlab]
-  #   restart: unless-stopped
+networks:
+  bridge-net:
+    driver: bridge
 
 volumes:
   redmine-db-data: {}
@@ -72,3 +16,121 @@ volumes:
   gitlab-config: {}
   gitlab-logs: {}
   gitlab-data: {}
+  bridge-db-data: {}
+
+services:
+  redmine-db:
+    profiles: [ "core" ]
+    image: postgres:16
+    environment:
+      POSTGRES_USER: redmine
+      POSTGRES_PASSWORD: redmine
+      POSTGRES_DB: redmine
+      TZ: ${TZ:-UTC}
+    volumes:
+      - redmine-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks: [ bridge-net ]
+    logging: *default-logging
+
+  redmine:
+    profiles: [ "core" ]
+    image: redmine:6.0.6-bookworm
+    depends_on: [ redmine-db ] # order only (no healthchecks)
+    environment:
+      REDMINE_DB_POSTGRES: redmine-db
+      REDMINE_DB_DATABASE: redmine
+      REDMINE_DB_USERNAME: redmine
+      REDMINE_DB_PASSWORD: redmine
+      REDMINE_SECRET_KEY_BASE: changeme
+      TZ: ${TZ:-UTC}
+    ports:
+      - "12344:3000" # Redmine on host/LAN
+    volumes:
+      - redmine-files:/usr/src/redmine/files
+      - redmine-plugins:/usr/src/redmine/plugins
+      - redmine-themes:/usr/src/redmine/public/themes
+    restart: unless-stopped
+    networks: [ bridge-net ]
+    logging: *default-logging
+
+  gitlab:
+    profiles: [ "core" ]
+    image: gitlab/gitlab-ce:18.3.0-ce.0
+    hostname: ${GITLAB_HOSTNAME:-gitlab.local}
+    environment:
+      GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD}
+      GITLAB_ROOT_EMAIL: ${GITLAB_ROOT_EMAIL}
+      TZ: ${TZ:-UTC}
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url '${GITLAB_EXTERNAL_URL:-http://localhost:12345}'
+        gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT:-2222}
+        # Force internal NGINX to listen on 80
+        nginx['listen_port'] = 80
+        nginx['listen_addresses'] = ['0.0.0.0']
+    shm_size: "1g"
+    ports:
+      - "12345:80" # GitLab HTTP on host/LAN
+      # - "2222:22"  # optional: SSH
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    restart: unless-stopped
+    networks: [ bridge-net ]
+    logging: *default-logging
+
+  bridge-db:
+    profiles: [ "app" ]
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${BRIDGE_DB_USER:-bridge}
+      POSTGRES_PASSWORD: ${BRIDGE_DB_PASSWORD:-bridge}
+      POSTGRES_DB: ${BRIDGE_DB_NAME:-bridge}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - bridge-db-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"   # <— add this (host 5433 → container 5432)
+    restart: unless-stopped
+    networks: [ bridge-net ]
+    logging: *default-logging
+
+  bridge:
+    profiles: [ "bridge" ]
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    depends_on:
+      - redmine
+      - gitlab
+      - bridge-db
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      ASPNETCORE_URLS: http://0.0.0.0:5001
+
+      # EF Core (Postgres)
+      ConnectionStrings__SyncDb: ${DB_CONN}
+
+      # Redmine (service-to-service URL inside the compose network)
+      Redmine__BaseUrl: http://redmine:3000
+      Redmine__ApiKey: ${REDMINE_API_KEY}
+      Redmine__GitlabCustomField: ${REDMINE_GITLAB_CF:-GitLab URL}
+
+      # GitLab (service-to-service URL inside the compose network)
+      GitLab__BaseUrl: http://gitlab
+      GitLab__PrivateToken: ${GITLAB_TOKEN}
+
+      # Polling
+      RedminePolling__Enabled: ${POLL_ENABLED:-true}
+      RedminePolling__IntervalSeconds: ${POLL_INTERVAL:-60}
+      RedminePolling__JitterSeconds: ${POLL_JITTER:-10}
+
+      # Trackers considered for sync
+      TrackersKeys__0: ${TRACKER0:-Feature}
+      TrackersKeys__1: ${TRACKER1:-Bug}
+    ports:
+      - "12346:5001" # Bridge exposed on host/LAN
+    restart: unless-stopped
+    networks: [ bridge-net ]
+    logging: *default-logging
