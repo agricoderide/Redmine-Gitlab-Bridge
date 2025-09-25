@@ -41,9 +41,24 @@ public sealed partial class SyncService
                 if (!StringComparer.Ordinal.Equals(proj.GitLabProject.Url, url) ||
                     !StringComparer.Ordinal.Equals(proj.GitLabProject.PathWithNamespace, path))
                 {
-                    proj.GitLabProject.Url = url!;
-                    proj.GitLabProject.PathWithNamespace = path!;
+
+                    proj.GitLabProject.GitLabProjectId = null; // force re-resolve only when path is good
+
+                    if (!string.IsNullOrWhiteSpace(goodProjWithGitlab.GitLabPathWithNs))
+                    {
+                        var (ok, id, msg) = await _gitlab.ResolveProjectIdAsync(goodProjWithGitlab.GitLabPathWithNs!, ct);
+                        if (ok)
+                        {
+                            proj.GitLabProject.Url = url!;
+                            proj.GitLabProject.PathWithNamespace = path!;
+                            proj.GitLabProject.GitLabProjectId = id;
+                        }
+                        else _log.LogError("Resolve GitLab id failed for {Path}: {Msg}", proj.GitLabProject.PathWithNamespace, msg);
+                    }
+
                 }
+
+
             }
 
             if (proj.GitLabProject?.GitLabProjectId is null &&

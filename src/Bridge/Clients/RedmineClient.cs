@@ -68,7 +68,9 @@ public sealed class RedmineClient
 
             var url = ExtractGitLabUrlFromProject(p, customFieldName);
             if (url is null)
+            {
                 break;
+            }
             var path = PathFromUrl(url);
 
             list.Add(new ProjectLink(
@@ -241,10 +243,12 @@ public sealed class RedmineClient
     }
 
 
-    public async Task<IssueBasic> GetSingleIssueBasicAsync(int issueId, CancellationToken ct = default)
+    public async Task<IssueBasic?> TryGetSingleIssueBasicAsync(int issueId, CancellationToken ct = default)
     {
         var resp = await _http.GetAsync($"issues/{issueId}.json", ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
         resp.EnsureSuccessStatusCode();
+
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
         var it = doc.RootElement.GetProperty("issue");
 
@@ -267,6 +271,7 @@ public sealed class RedmineClient
 
         return new IssueBasic(issueId, null, title, desc, labels, assigneeId, due, status, updated);
     }
+
 
 
     public async Task<(bool ok, string message)> UpdateIssueAsync(

@@ -37,6 +37,7 @@ public sealed partial class SyncService
 
                 await SyncMembersAsync(p, ct);
                 await SyncIssuesAsync(p, glId, ct);
+
             }
             catch (Exception ex)
             {

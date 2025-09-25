@@ -205,41 +205,36 @@ string? state = null,
 
 
     // This is used to create a kind of snapshot of the issue and save it to the database
-    public async Task<IssueBasic> GetSingleIssueBasicAsync(long projectId, long issueIid, CancellationToken ct = default)
+    public async Task<IssueBasic?> TryGetSingleIssueBasicAsync(
+    long projectId, long issueIid, CancellationToken ct = default)
     {
-        
         var resp = await _http.GetAsync($"projects/{projectId}/issues/{issueIid}", ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
         resp.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-        var e = doc.RootElement;
 
-        var title = e.GetProperty("title").GetString() ?? "";
-        var desc = e.TryGetProperty("description", out var d) ? d.GetString() : null;
+        var it = doc.RootElement; // your parser for GL issue basic (same as existing)
+        var title = it.GetProperty("title").GetString() ?? "";
+        var desc = it.TryGetProperty("description", out var d) ? d.GetString() : null;
 
         List<string>? labels = null;
-        if (e.TryGetProperty("labels", out var labs) && labs.ValueKind == JsonValueKind.Array)
-            labels = labs.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList();
+        if (it.TryGetProperty("labels", out var la) && la.ValueKind == JsonValueKind.Array)
+            labels = la.EnumerateArray().Select(x => x.GetString() ?? "").Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
 
         int? assigneeId = null;
-        if (e.TryGetProperty("assignees", out var ass) && ass.ValueKind == JsonValueKind.Array)
-        {
-            var first = ass.EnumerateArray().FirstOrDefault();
-            if (first.ValueKind == JsonValueKind.Object && first.TryGetProperty("id", out var aid))
-                assigneeId = aid.GetInt32();
-        }
+        if (it.TryGetProperty("assignee", out var a) && a.ValueKind == JsonValueKind.Object && a.TryGetProperty("id", out var aid))
+            assigneeId = aid.GetInt32();
 
-        DateTime? due = null;
-        if (e.TryGetProperty("due_date", out var dd) && dd.ValueKind == JsonValueKind.String)
-            due = DateTime.Parse(dd.GetString()!);
+        DateTime? due = it.TryGetProperty("due_date", out var dd) && dd.ValueKind == JsonValueKind.String
+            ? DateTime.Parse(dd.GetString()!) : (DateTime?)null;
 
-        var state = e.TryGetProperty("state", out var st) ? st.GetString() : null;
+        string? status = it.TryGetProperty("state", out var st) ? st.GetString() : null;
 
         DateTimeOffset? updated = null;
-        if (e.TryGetProperty("updated_at", out var ua) && ua.ValueKind == JsonValueKind.String)
+        if (it.TryGetProperty("updated_at", out var ua) && ua.ValueKind == JsonValueKind.String)
             updated = DateTimeOffset.Parse(ua.GetString()!, null, System.Globalization.DateTimeStyles.AssumeUniversal);
 
-        var iid = e.GetProperty("iid").GetInt64();
-        return new IssueBasic(null, iid, title, desc, labels, assigneeId, due, state, updated);
+        return new IssueBasic(RedmineId: null, GitLabIid: issueIid, Title: title, Description: desc, Labels: labels, AssigneeId: assigneeId, DueDate: due, Status: status, UpdatedAtUtc: updated);
     }
 
 

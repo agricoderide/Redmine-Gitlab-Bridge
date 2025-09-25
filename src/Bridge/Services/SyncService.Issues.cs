@@ -10,6 +10,7 @@ public sealed partial class SyncService
     {
         if (p is null || p.GitLabProject is null) return;
 
+        // Every issue that is on both redmine and gitlab, but not in the table
         var rmIssues = (await _redmine.GetProjectIssuesBasicAsync(p.RedmineIdentifier, ct)).ToList();
         var glIssues = (await _gitlab.GetProjectIssuesBasicAsync(glId, ct)).ToList();
 
@@ -22,8 +23,11 @@ public sealed partial class SyncService
             .Where(m => m.ProjectSyncId == p.Id)
             .Select(m => m.GitLabIssueId));
 
-        // 3) Seed 1:1 mappings by exact title (your current heuristic)
+        // 3) Seed 1:1 mappings by exact title that are not already in the database
         await SeedMappingsByTitleAsync(p, glId, rmIssues, glIssues, mappedRm, mappedGl, ct);
+        await _db.SaveChangesAsync(ct);
+
+        await CheckIfIssuesFromTheTableStillExist(p, glId, rmIssues, glIssues, mappedRm, mappedGl, ct);
         await _db.SaveChangesAsync(ct);
 
         // 4) Create missing issues on each side
@@ -37,6 +41,71 @@ public sealed partial class SyncService
         await ReconcileMappingsAsync(p, rmIssues, glIssues, ct);
         await _db.SaveChangesAsync(ct);
     }
+
+    private async Task CheckIfIssuesFromTheTableStillExist(
+        ProjectSync p,
+        long glId,
+        List<IssueBasic> rmIssues,
+        List<IssueBasic> glIssues,
+        HashSet<int> mappedRm,
+        HashSet<long> mappedGl,
+        CancellationToken ct)
+    {
+        // Fast existence sets from the lists we already fetched
+        var rmExisting = rmIssues
+            .Where(i => i.RedmineId is not null)
+            .Select(i => i.RedmineId!.Value)
+            .ToHashSet();
+
+        var glExisting = glIssues
+            .Where(i => i.GitLabIid is not null)
+            .Select(i => i.GitLabIid!.Value)
+            .ToHashSet();
+
+        // Load mappings for this project
+        var mappings = await _db.IssueMappings
+            .Where(m => m.ProjectSyncId == p.Id)
+            .ToListAsync(ct);
+
+        foreach (var m in mappings.ToList())
+        {
+            ct.ThrowIfCancellationRequested();
+
+            bool rmExists = rmExisting.Contains(m.RedmineIssueId);
+            bool glExists = glExisting.Contains(m.GitLabIssueId);
+
+            // Double-check with API (handles any paging or transient listing gaps)
+            if (!rmExists)
+            {
+                var rm = await _redmine.TryGetSingleIssueBasicAsync(m.RedmineIssueId, ct);
+                rmExists = rm is not null;
+            }
+
+            if (!glExists)
+            {
+                var gl = await _gitlab.TryGetSingleIssueBasicAsync(glId, m.GitLabIssueId, ct);
+                glExists = gl is not null;
+            }
+
+            // If either side is gone, delete the mapping row (your chosen behavior)
+            if (!rmExists || !glExists)
+            {
+                _db.IssueMappings.Remove(m);
+                mappedRm.Remove(m.RedmineIssueId);
+                mappedGl.Remove(m.GitLabIssueId);
+
+                _log.LogInformation(
+                    "Removed mapping P{ProjectId} RM#{RmId} ⇄ GL!{GlIid} because {Side} issue no longer exists.",
+                    p.Id,
+                    m.RedmineIssueId,
+                    m.GitLabIssueId,
+                    (!rmExists && !glExists) ? "both" : (!rmExists ? "Redmine" : "GitLab"));
+            }
+        }
+    }
+
+
+
 
     private async Task CreateRedmineFromGitLabAsync(ProjectSync p, IssueBasic gli, HashSet<int> mappedRm, HashSet<long> mappedGl, CancellationToken ct)
     {
@@ -107,12 +176,16 @@ public sealed partial class SyncService
         _db.IssueMappings.Add(mapping);
 
         // To compute the hashvalue
-        var glCurrent = await _gitlab.GetSingleIssueBasicAsync(p.GitLabProject!.GitLabProjectId!.Value, giid, ct);
+        var glCurrent = await _gitlab.TryGetSingleIssueBasicAsync(p.GitLabProject!.GitLabProjectId!.Value, giid, ct);
         mapping.CanonicalSnapshot = glCurrent;
 
         mappedGl.Add(giid);
         mappedRm.Add(newRmId);
     }
+
+
+
+
 
     private async Task CreateGitLabFromRedmineAsync(ProjectSync p, long glId, IssueBasic rmi, HashSet<int> mappedRm, HashSet<long> mappedGl, CancellationToken ct)
     {
@@ -159,7 +232,7 @@ public sealed partial class SyncService
         _db.IssueMappings.Add(mapping);
 
         // INIT canonical to RM
-        var rmCurrent = await _redmine.GetSingleIssueBasicAsync(rmId, ct);
+        var rmCurrent = await _redmine.TryGetSingleIssueBasicAsync(rmId, ct);
         mapping.CanonicalSnapshot = rmCurrent;
 
         mappedRm.Add(rmId);
@@ -193,7 +266,7 @@ public sealed partial class SyncService
             _db.IssueMappings.Add(mapping);
 
             // To compute the hash value
-            var glCurrent = await _gitlab.GetSingleIssueBasicAsync(glId, giid, ct);
+            var glCurrent = await _gitlab.TryGetSingleIssueBasicAsync(glId, giid, ct);
             await PatchRedmineFromGitLabAsync(p, mapping, glCurrent, ct);
             mapping.CanonicalSnapshot = glCurrent;
 

@@ -23,7 +23,7 @@ public sealed partial class SyncService
             UpdatedAtUtc: gl.UpdatedAtUtc
         );
 
-        var rmCurrent = await _redmine.GetSingleIssueBasicAsync(m.RedmineIssueId, ct);
+        var rmCurrent = await _redmine.TryGetSingleIssueBasicAsync(m.RedmineIssueId, ct);
         var patch = await BuildRedminePatchAsync(rmCurrent, rmTarget, ct);
         await ApplyRedminePatchAsync(m.RedmineIssueId, patch, ct);
     }
@@ -45,7 +45,7 @@ public sealed partial class SyncService
             UpdatedAtUtc: rm.UpdatedAtUtc
         );
 
-        var glCurrent = await _gitlab.GetSingleIssueBasicAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, ct);
+        var glCurrent = await _gitlab.TryGetSingleIssueBasicAsync(p.GitLabProject!.GitLabProjectId!.Value, m.GitLabIssueId, ct);
         var patch = await BuildGitLabPatchAsync(glCurrent, glTarget, ct);
         await ApplyGitLabPatchAsync(p, m.GitLabIssueId, patch, ct);
     }
