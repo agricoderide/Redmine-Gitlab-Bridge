@@ -19,20 +19,14 @@ public sealed class Program
 {
     public static async Task Main(string[] args)
     {
-        // Create the host builder (loads configuration, logging, etc.)
         var builder = WebApplication.CreateBuilder(args);
 
-        // Note: .NET automatically loads appsettings.json + appsettings.{ENV}.json
-        // where ENV is ASPNETCORE_ENVIRONMENT (Development/Production/etc.)
-
-        // Bind strongly-typed options from configuration for DI
         builder.Services.Configure<RedmineOptions>(builder.Configuration.GetSection(RedmineOptions.SectionName));
         builder.Services.Configure<GitLabOptions>(builder.Configuration.GetSection(GitLabOptions.SectionName));
         builder.Services.Configure<TrackersKeys>(builder.Configuration.GetSection("Trackers"));
         builder.Services.Configure<RedminePollingOptions>(builder.Configuration.GetSection("Polling:Redmine"));
 
 
-        // Resilience policy for outbound HTTP calls (exponential backoff + jitter)
         static IAsyncPolicy<HttpResponseMessage> RetryPolicy() =>
             HttpPolicyExtensions
                 .HandleTransientHttpError()
@@ -43,14 +37,9 @@ public sealed class Program
 
 
 
-        // Typed HttpClients for external services, using the above retry policy
         builder.Services.AddHttpClient<RedmineClient>().AddPolicyHandler(RetryPolicy());
         builder.Services.AddHttpClient<GitLabClient>().AddPolicyHandler(RetryPolicy());
-
-        // Redmine polling configuration + background services
-
         builder.Services.AddScoped<SyncService>();
-
         builder.Services.AddHostedService<RedminePollingWorker>();
 
         // Health checks and Swagger/OpenAPI generator
@@ -58,15 +47,12 @@ public sealed class Program
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddSwaggerGen();
 
-        // Database (EF Core): configure SyncDbContext
         builder.Services.AddDbContext<SyncDbContext>(options =>
         {
             var conn = builder.Configuration.GetConnectionString("DefaultConnection")
                        ?? "Data Source=bridge.db"; // SQLite for dev
             options.UseSqlite(conn);
         });
-
-
 
         var app = builder.Build();
 
@@ -77,7 +63,6 @@ public sealed class Program
             app.UseSwaggerUI();
         }
 
-        // Respect proxy headers (X-Forwarded-For/Proto) when behind reverse proxies
         app.UseForwardedHeaders(new ForwardedHeadersOptions
         {
             ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto

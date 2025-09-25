@@ -6,7 +6,7 @@ namespace Bridge.Services;
 
 public sealed partial class SyncService
 {
-    private async Task SyncProjectsAsync(CancellationToken ct)
+    private async Task GetRedmine_GitlabProjects(CancellationToken ct)
     {
         var listProjects = await _redmine.GetProjectsWithGitLabLinksAsync(_redmine._opt.GitlabCustomField, ct);
 
@@ -35,7 +35,6 @@ public sealed partial class SyncService
 
             if (!string.IsNullOrWhiteSpace(url) && !string.IsNullOrWhiteSpace(path))
             {
-                // create the child if it doesn't exist
                 proj.GitLabProject ??= new GitLabProject();
 
                 // update fields (only when they differ)
@@ -47,7 +46,6 @@ public sealed partial class SyncService
                 }
             }
 
-            // 4) Resolve numeric GitLab project ID when we have a path
             if (proj.GitLabProject?.GitLabProjectId is null &&
                 !string.IsNullOrWhiteSpace(proj.GitLabProject?.PathWithNamespace))
             {

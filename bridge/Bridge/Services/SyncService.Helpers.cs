@@ -9,7 +9,6 @@ namespace Bridge.Services;
 public sealed partial class SyncService
 {
 
-    // at top of the file (or your helpers file)
     internal static class DescriptionUtils
     {
         public static string AddOrUpdateSourceLink(string? description, string sourceUrl)
@@ -17,7 +16,6 @@ public sealed partial class SyncService
             var body = (description ?? string.Empty).Replace("\r\n", "\n").TrimStart('\n');
             if (body.StartsWith("Source:", StringComparison.OrdinalIgnoreCase))
             {
-                // replace the first line with the new Source
                 var nl = body.IndexOf('\n');
                 var rest = nl >= 0 ? body[(nl + 1)..].TrimStart('\n') : string.Empty;
                 return rest.Length > 0 ? $"Source: {sourceUrl}\n\n{rest}" : $"Source: {sourceUrl}";
@@ -26,27 +24,10 @@ public sealed partial class SyncService
         }
     }
 
-    private async Task<int?> ResolveRedmineStatusIdFromGitLabState(string? glState, CancellationToken ct)
-    {
-        var target = string.Equals(glState, "closed", StringComparison.OrdinalIgnoreCase) ? "Closed" : "New";
-        return await _db.StatusesRedmine.Where(s => s.Name == target)
-                 .Select(s => (int?)s.RedmineStatusId).FirstOrDefaultAsync(ct);
-    }
-
     private static string? MapGitLabStateFromRedmine(string? rmStatus)
     {
         if (string.IsNullOrWhiteSpace(rmStatus)) return null;
         return string.Equals(rmStatus, "Closed", StringComparison.OrdinalIgnoreCase) ? "closed" : "opened";
-    }
-
-    private async Task<int?> GetTrackerIdByNameAsync(string? trackerName, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(trackerName)) return null;
-        trackerName = trackerName.Trim();
-        return await _db.TrackersRedmine
-            .Where(t => t.Name.ToLower() == trackerName.ToLower())
-            .Select(t => (int?)t.RedmineTrackerId)
-            .FirstOrDefaultAsync(ct);
     }
 
     private async Task<int?> ToRedmineAssigneeAsync(int? gitLabAssigneeId, CancellationToken ct)
@@ -159,26 +140,15 @@ public sealed partial class SyncService
         }
     }
 
-
-
-
-
-
     public static string ExtractSearchKey(string username)
     {
         if (string.IsNullOrWhiteSpace(username)) return "";
-
         username = username.Trim();
-
-        // if username has separators like john.prior → take last part
         var parts = username.Split(new[] { '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length > 1)
             return parts[^1];
-
-        // compact handles like "rprior" → drop the first letter if long enough
         if (username.Length >= 4)
             return username.Substring(1);
-
         return username;
     }
 

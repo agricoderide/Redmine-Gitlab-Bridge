@@ -10,7 +10,6 @@ public sealed partial class SyncService
     {
         if (p is null || p.GitLabProject is null) return;
 
-        // 1) Load lists (once)
         var rmIssues = (await _redmine.GetProjectIssuesBasicAsync(p.RedmineIdentifier, ct)).ToList();
         var glIssues = (await _gitlab.GetProjectIssuesBasicAsync(glId, ct)).ToList();
 
@@ -62,6 +61,7 @@ public sealed partial class SyncService
                 .FirstOrDefaultAsync(ct)
             : null;
 
+        if (p == null || p.GitLabProject == null) return;
         var gitlabUrl = $"{p.GitLabProject.Url}/-/issues/{gli.GitLabIid}";
 
         int? statusId = null;

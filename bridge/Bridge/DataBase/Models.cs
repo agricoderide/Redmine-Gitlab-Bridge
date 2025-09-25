@@ -1,7 +1,6 @@
 namespace Bridge.Contracts
 {
 
-    public sealed class TrackersKeys : List<string> { }
 
     public sealed record ProjectLink(
         int RedmineProjectId,
@@ -28,6 +27,8 @@ namespace Bridge.Contracts
 
 namespace Bridge.Infrastructure.Options
 {
+    public sealed class TrackersKeys : List<string> { }
+
     public sealed class RedmineOptions
     {
         public const string SectionName = "Redmine";
@@ -41,7 +42,7 @@ namespace Bridge.Infrastructure.Options
     {
         public bool Enabled { get; set; } = true;
         public int IntervalSeconds { get; set; } = 60; // 1 minute default
-        public int JitterSeconds { get; set; } = 5;    // small random spread to avoid thundering herd
+        public int JitterSeconds { get; set; } = 5;
     }
 
 

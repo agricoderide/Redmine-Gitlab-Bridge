@@ -1,10 +1,6 @@
 using System.Diagnostics;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Bridge.Infrastructure.Options;
-using Bridge.Services; // for SyncService
-using Microsoft.Extensions.DependencyInjection;
 
 namespace Bridge.Services;
 

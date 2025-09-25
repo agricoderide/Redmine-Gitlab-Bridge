@@ -73,11 +73,7 @@ public sealed class IssueMapping
     public long GitLabIssueId { get; set; }
     [ForeignKey(nameof(ProjectSync))] public int ProjectSyncId { get; set; }
     public ProjectSync ProjectSync { get; set; } = null!;
-
-    // NEW: single canonical snapshot (IssueBasic serialized to JSON)
     public IssueBasic? CanonicalSnapshot { get; set; }
-
-    // Optional: for webhook idempotency (GitLab Issues Hook)
     public string? LastGitLabEventUuid { get; set; }
 }
 
@@ -89,8 +85,8 @@ public sealed class User
 {
     [Key] public int Id { get; set; }
 
-    public int? RedmineUserId { get; set; }   // RM numeric id
-    public int? GitLabUserId { get; set; }   // GL numeric id
+    public int? RedmineUserId { get; set; }  
+    public int? GitLabUserId { get; set; }
 
     public string? Username { get; set; }
 
@@ -100,8 +96,8 @@ public sealed class User
 [Index(nameof(Name), IsUnique = true)]
 public sealed class TrackerRedmine
 {
-    [Key] public int Id { get; set; }                // PK in your own DB
-    [Required] public int RedmineTrackerId { get; set; }  // Redmine’s tracker id
+    [Key] public int Id { get; set; }
+    [Required] public int RedmineTrackerId { get; set; }
     [Required] public string Name { get; set; } = null!;
 }
 
@@ -110,7 +106,7 @@ public sealed class TrackerRedmine
 [Index(nameof(Name), IsUnique = true)]
 public sealed class StatusRedmine
 {
-    [Key] public int Id { get; set; }                 // PK
-    [Required] public int RedmineStatusId { get; set; }    // numeric id from Redmine
-    [Required] public string Name { get; set; } = "";      // e.g. "New", "In Progress", "Closed"
+    [Key] public int Id { get; set; }
+    [Required] public int RedmineStatusId { get; set; }
+    [Required] public string Name { get; set; } = "";
 }

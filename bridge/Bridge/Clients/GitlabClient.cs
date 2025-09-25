@@ -21,7 +21,6 @@ public sealed class GitLabClient
     {
         _http = http;
         _opt = opt.Value;
-
         _trackers = trackers.Value;
 
         _http.BaseAddress = new Uri(_opt.BaseUrl.TrimEnd('/') + "/api/v4/");
@@ -38,11 +37,7 @@ public sealed class GitLabClient
         _http.DefaultRequestHeaders.Add("PRIVATE-TOKEN", _opt.PrivateToken);
     }
 
-
-
-
-
-    /// <summary>Quick connectivity check.</summary>
+    // Connectivity check
     public async Task<(bool ok, string message)> PingAsync(CancellationToken ct = default)
     {
         var resp = await _http.GetAsync("projects?per_page=1", ct);
@@ -56,34 +51,7 @@ public sealed class GitLabClient
         return (true, $"OK. projects={arrLen}");
     }
 
-
-
-
-
-
-
-
-
-
-    /// <summary>Resolve numeric GitLab project id from a path like "group/subgroup/repo".</summary>
-    public async Task<(bool ok, long id, string message)> ResolveProjectIdAsync(
-        string pathWithNamespace,
-        CancellationToken ct = default)
-    {
-        var encoded = Uri.EscapeDataString(pathWithNamespace);
-        var resp = await _http.GetAsync($"projects/{encoded}", ct);
-        if (!resp.IsSuccessStatusCode)
-            return (false, 0, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}");
-
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-        var id = doc.RootElement.GetProperty("id").GetInt64();
-        return (true, id, "ok");
-    }
-
-
-
-    // in GitLabClient.cs
-
+    // Get all issues from gitlab repo id that respect the trackers from the config
     public async Task<IReadOnlyList<IssueBasic>> GetProjectIssuesBasicAsync(long projectId, CancellationToken ct = default)
     {
         var resp = await _http.GetAsync($"projects/{projectId}/issues?per_page=300&state=all", ct);
@@ -93,6 +61,7 @@ public sealed class GitLabClient
         if (doc.RootElement.ValueKind != JsonValueKind.Array) return Array.Empty<IssueBasic>();
 
         var list = new List<IssueBasic>(doc.RootElement.GetArrayLength());
+
         foreach (var e in doc.RootElement.EnumerateArray())
         {
             var iid = e.GetProperty("iid").GetInt64();
@@ -138,20 +107,10 @@ public sealed class GitLabClient
                 list.Add(new IssueBasic(null, iid, title, desc, new List<string>() { label }, gitLabAssigneeId, dueDate, Status: state));
             }
         }
+
         return list;
     }
 
-
-
-
-
-
-
-
-    /// <summary>
-    /// Create a GitLab issue (Title/Description/Labels). 
-    /// Returns new IID if successful.
-    /// </summary>
     public async Task<(bool ok, long newGitLabIid, string message)> CreateIssueAsync(
         long projectId,
         string title,
@@ -163,25 +122,23 @@ public sealed class GitLabClient
 string? state = null,
         CancellationToken ct = default)
     {
+        #region CreateNewDescription
         var fullDesc = new StringBuilder();
-        // remove existing "Source:" if it’s the first line
-        var cleanDesc = description ?? "";
+        var cleanDesc = description ?? "";         // remove existing "Source:" if it is the first line
         var lines = cleanDesc.Split('\n').ToList();
         if (lines.Count > 0 && lines[0].TrimStart().StartsWith("Source:", StringComparison.OrdinalIgnoreCase))
         {
             lines.RemoveAt(0);
             cleanDesc = string.Join('\n', lines);
         }
-
-        // now prepend the new Source if provided
         if (!string.IsNullOrEmpty(sourceUrl))
         {
             fullDesc.AppendLine($"Source: {sourceUrl}");
-            fullDesc.AppendLine(); // blank line for spacing
+            fullDesc.AppendLine();
         }
-
         if (!string.IsNullOrEmpty(cleanDesc))
             fullDesc.AppendLine(cleanDesc);
+        #endregion
 
         var payload = new Dictionary<string, string?>
         {
@@ -197,8 +154,6 @@ string? state = null,
         if (assigneeId.HasValue)
             payload["assignee_ids"] = assigneeId.Value.ToString();
 
-
-
         using var content = new FormUrlEncodedContent(payload);
         var resp = await _http.PostAsync($"projects/{projectId}/issues", content, ct);
         var body = await resp.Content.ReadAsStringAsync(ct);
@@ -209,7 +164,7 @@ string? state = null,
         using var doc = JsonDocument.Parse(body);
         var iid = doc.RootElement.GetProperty("iid").GetInt64();
 
-        // 4) Close it afterwards if requested
+        // Close the issue if it was marked as close
         if (string.Equals(state, "closed", StringComparison.OrdinalIgnoreCase))
         {
             var closeOk = await CloseIssueAsync(projectId, iid, ct);
@@ -221,22 +176,7 @@ string? state = null,
         return (true, iid, "created");
     }
 
-
-
-    // helper: PUT state_event=close
-    public async Task<bool> CloseIssueAsync(long projectId, long issueIid, CancellationToken ct = default)
-    {
-        var payload = new { state_event = "close" };
-        using var content = new StringContent(
-            System.Text.Json.JsonSerializer.Serialize(payload),
-            Encoding.UTF8,
-            "application/json"
-        );
-        var resp = await _http.PutAsync($"/api/v4/projects/{projectId}/issues/{issueIid}", content, ct);
-        return resp.IsSuccessStatusCode;
-    }
-
-    // GitLab: project members (includes inherited members)
+    // Get all the members that belong to the repo
     public async Task<List<GlMember>> GetGitLabProjectMembersAsync(int projectId, CancellationToken ct = default)
     {
         var all = new List<GlMember>();
@@ -252,7 +192,8 @@ string? state = null,
                 var user = m.GetProperty("username").GetString() ?? "";
                 var name = m.GetProperty("name").GetString() ?? "";
 
-                if (IsBotUsername(user)) continue;    // ← skip project/group bots
+                // Do not add if it is a bot user
+                if (IsBotUsername(user)) continue;
 
                 all.Add(new GlMember(id, user, name));
             }
@@ -263,9 +204,7 @@ string? state = null,
     }
 
 
-
-
-    // ADD in class GitLabClient
+    // This is used to create a kind of snapshot of the issue and save it to the database
     public async Task<IssueBasic> GetSingleIssueBasicAsync(long projectId, long issueIid, CancellationToken ct = default)
     {
         var resp = await _http.GetAsync($"projects/{projectId}/issues/{issueIid}", ct);
@@ -302,6 +241,9 @@ string? state = null,
         return new IssueBasic(null, iid, title, desc, labels, assigneeId, due, state, updated);
     }
 
+
+
+    // Update issue that was found that was a previous version
     public async Task<(bool ok, string message)> UpdateIssueAsync(
         long projectId, long issueIid,
         string? title = null,
@@ -330,8 +272,33 @@ string? state = null,
     }
 
 
+    // Method to close issue
+    public async Task<bool> CloseIssueAsync(long projectId, long issueIid, CancellationToken ct = default)
+    {
+        var payload = new { state_event = "close" };
+        using var content = new StringContent(
+            System.Text.Json.JsonSerializer.Serialize(payload),
+            Encoding.UTF8,
+            "application/json"
+        );
+        var resp = await _http.PutAsync($"/api/v4/projects/{projectId}/issues/{issueIid}", content, ct);
+        return resp.IsSuccessStatusCode;
+    }
 
+    // Resolve numeric GitLab project id from a path like "group/subgroup/repo".
+    public async Task<(bool ok, long id, string message)> ResolveProjectIdAsync(
+        string pathWithNamespace,
+        CancellationToken ct = default)
+    {
+        var encoded = Uri.EscapeDataString(pathWithNamespace);
+        var resp = await _http.GetAsync($"projects/{encoded}", ct);
+        if (!resp.IsSuccessStatusCode)
+            return (false, 0, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}");
 
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        var id = doc.RootElement.GetProperty("id").GetInt64();
+        return (true, id, "ok");
+    }
 
     static readonly Regex ProjectOrGroupBotRx =
     new(@"^(project|group)_[0-9]+_bot($|_)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);

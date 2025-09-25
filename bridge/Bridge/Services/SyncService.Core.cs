@@ -1,4 +1,3 @@
-using Bridge.Contracts;
 using Bridge.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -19,18 +18,15 @@ public sealed partial class SyncService
         _log = log;
     }
 
-    /// <summary>One full, idempotent sync pass. Call this every poll tick.</summary>
+    // Sync every poll tick
     public async Task RunOnceAsync(CancellationToken ct)
     {
-        // 0) Ensure reference data is fresh (idempotent)
         await _db.Database.MigrateAsync(ct);
         await _redmine.SyncGlobalTrackersAsync(ct);
         await _redmine.SyncGlobalStatusesAsync(ct);
 
-        // 1) Discover/refresh projects from Redmine (with GitLab link) and resolve GitLab numeric id
-        await SyncProjectsAsync(ct);
+        await GetRedmine_GitlabProjects(ct);
 
-        // 2) For each project: sync members + issues incrementally
         var projects = await _db.Projects.AsNoTracking().Include(p => p.GitLabProject).ToListAsync(ct);
         foreach (var p in projects)
         {

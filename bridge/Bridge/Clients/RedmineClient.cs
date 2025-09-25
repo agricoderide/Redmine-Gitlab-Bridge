@@ -4,15 +4,12 @@ using System.Text.Json;
 using Bridge.Contracts;
 using Bridge.Data;
 using Bridge.Infrastructure.Options;
-using GitLabApiClient.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
 namespace Bridge.Services;
 
-/// <summary>
-/// Typed Redmine API client (JSON). Exposes runtime-ready helpers and DTOs.
-/// </summary>
+
 public sealed class RedmineClient
 {
     public record RmMember(int Id, string Name);
@@ -32,15 +29,11 @@ public sealed class RedmineClient
         _http.BaseAddress = new Uri(_opt.BaseUrl.TrimEnd('/') + "/");
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-        // API key in header (preferred)
         if (!string.IsNullOrWhiteSpace(_opt.ApiKey))
             _http.DefaultRequestHeaders.Add("X-Redmine-API-Key", _opt.ApiKey);
     }
 
-
-
-
-    /// <summary>Very simple connectivity check by listing projects.</summary>
+    // Connectivity check
     public async Task<(bool ok, string message)> PingAsync(CancellationToken ct = default)
     {
         var resp = await _http.GetAsync("projects.json?limit=1", ct);
@@ -54,21 +47,14 @@ public sealed class RedmineClient
         return (true, $"OK. projects={count}");
     }
 
-
-
-
-    /// <summary>
-    /// Returns Redmine projects with an optional GitLab link pulled from a custom field (by name).
-    /// Also computes GitLab path-with-namespace when a URL is present.
-    /// </summary>
+    // Get all redmine projects that have a gitlab url
     public async Task<IReadOnlyList<ProjectLink>> GetProjectsWithGitLabLinksAsync(
         string customFieldName,
         CancellationToken ct = default)
     {
-        var resp = await _http.GetAsync("projects.json?include=custom_fields", ct); //httpResponseMessage
+        var resp = await _http.GetAsync("projects.json?include=custom_fields", ct);
         resp.EnsureSuccessStatusCode();
 
-        // we create a jsondocument based on the received string
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
         if (!doc.RootElement.TryGetProperty("projects", out var arr))
             return Array.Empty<ProjectLink>();
@@ -97,29 +83,8 @@ public sealed class RedmineClient
         return list;
     }
 
-    // Redmine: project memberships (id + name)
-    public async Task<List<RmMember>> GetRedmineMembersAsync(int projID, CancellationToken ct = default)
-    {
-        var all = new List<RmMember>();
-        for (int offset = 0; ; offset += 100)
-        {
-            var resp = await _http.GetAsync($"/projects/{projID}/memberships.json?limit=100&offset={offset}", ct);
-            if (!resp.IsSuccessStatusCode) throw new HttpRequestException($"{(int)resp.StatusCode} {resp.ReasonPhrase}");
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-            var memberships = doc.RootElement.GetProperty("memberships").EnumerateArray().ToList();
-            foreach (var m in memberships)
-            {
-                var u = m.GetProperty("user");
-                all.Add(new RmMember(u.GetProperty("id").GetInt32(), u.GetProperty("name").GetString() ?? ""));
-            }
-            var total = doc.RootElement.TryGetProperty("total_count", out var t) ? t.GetInt32() : all.Count;
-            if (all.Count >= total || memberships.Count == 0) break;
-        }
-        return all;
-    }
 
 
-    // in RedmineClient.cs
 
     public async Task<IReadOnlyList<IssueBasic>> GetProjectIssuesBasicAsync(string projectIdOrKey, CancellationToken ct = default)
     {
@@ -161,7 +126,6 @@ public sealed class RedmineClient
     }
 
 
-    // in RedmineClient.cs
     public async Task SyncGlobalStatusesAsync(CancellationToken ct = default)
     {
         using var scope = _scopeFactory.CreateScope();
@@ -182,7 +146,7 @@ public sealed class RedmineClient
             if (existing is null)
                 db.StatusesRedmine.Add(new StatusRedmine { RedmineStatusId = sid, Name = name });
             else
-                existing.Name = name; // keep name fresh if renamed
+                existing.Name = name;
         }
 
         await db.SaveChangesAsync(ct);
@@ -199,11 +163,9 @@ public sealed class RedmineClient
             string? sourceUrl = null,
             DateTime? dueDate = null,
             int? statusId = null,
-        CancellationToken ct = default) // <- seeder passes Feature/Bug id here
+        CancellationToken ct = default)
     {
-
         var fullDesc = new StringBuilder();
-        // remove existing "Source:" if it’s the first line
         var cleanDesc = description ?? "";
         var lines = cleanDesc.Split('\n').ToList();
         if (lines.Count > 0 && lines[0].TrimStart().StartsWith("Source:", StringComparison.OrdinalIgnoreCase))
@@ -211,16 +173,15 @@ public sealed class RedmineClient
             lines.RemoveAt(0);
             cleanDesc = string.Join('\n', lines);
         }
-
-        // now prepend the new Source if provided
         if (!string.IsNullOrEmpty(sourceUrl))
         {
             fullDesc.AppendLine($"Source: {sourceUrl}");
-            fullDesc.AppendLine(); // blank line for spacing
+            fullDesc.AppendLine();
         }
-
         if (!string.IsNullOrEmpty(cleanDesc))
             fullDesc.AppendLine(cleanDesc);
+
+
 
         var issue = new Dictionary<string, object?>
         {
@@ -240,9 +201,6 @@ public sealed class RedmineClient
             issue["assigned_to_id"] = assigneeId.Value;
 
         using var content = new StringContent(JsonSerializer.Serialize(new { issue }), Encoding.UTF8, "application/json");
-        // _log.LogInformation("Creating issue in Redmine: {Json}", JsonSerializer.Serialize(new { issue }));
-        // foreach (var h in _http.DefaultRequestHeaders)
-        //     _log.LogInformation("Header {Key}: {Val}", h.Key, string.Join(",", h.Value));
 
         var resp = await _http.PostAsync("issues.json", content, ct);
         var body = await resp.Content.ReadAsStringAsync(ct);
@@ -283,36 +241,6 @@ public sealed class RedmineClient
     }
 
 
-
-
-    // -------------------
-    // Helpers
-    // -------------------
-    private static int GetInt(JsonElement e, string name) => e.GetProperty(name).GetInt32();
-    private static string? TryGetString(JsonElement e, string name) =>
-        e.TryGetProperty(name, out var v) ? v.GetString() : null;
-
-    private static string? ExtractGitLabUrlFromProject(JsonElement project, string cfName)
-    {
-        if (!project.TryGetProperty("custom_fields", out var cfs) || cfs.ValueKind != JsonValueKind.Array)
-            return null;
-
-        foreach (var cf in cfs.EnumerateArray())
-        {
-            var name = TryGetString(cf, "name");
-            if (string.Equals(name, cfName, StringComparison.OrdinalIgnoreCase))
-            {
-                var value = TryGetString(cf, "value");
-                return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-            }
-        }
-
-        return null;
-    }
-
-    // ADD near your other usings
-
-    // ADD in class RedmineClient
     public async Task<IssueBasic> GetSingleIssueBasicAsync(int issueId, CancellationToken ct = default)
     {
         var resp = await _http.GetAsync($"issues/{issueId}.json", ct);
@@ -340,6 +268,7 @@ public sealed class RedmineClient
         return new IssueBasic(issueId, null, title, desc, labels, assigneeId, due, status, updated);
     }
 
+
     public async Task<(bool ok, string message)> UpdateIssueAsync(
         int issueId,
         string? subject = null,
@@ -366,14 +295,57 @@ public sealed class RedmineClient
     }
 
 
+    public async Task<List<RmMember>> GetRedmineMembersAsync(int projID, CancellationToken ct = default)
+    {
+        var all = new List<RmMember>();
+        for (int offset = 0; ; offset += 100)
+        {
+            var resp = await _http.GetAsync($"/projects/{projID}/memberships.json?limit=100&offset={offset}", ct);
+            if (!resp.IsSuccessStatusCode) throw new HttpRequestException($"{(int)resp.StatusCode} {resp.ReasonPhrase}");
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            var memberships = doc.RootElement.GetProperty("memberships").EnumerateArray().ToList();
+            foreach (var m in memberships)
+            {
+                var u = m.GetProperty("user");
+                all.Add(new RmMember(u.GetProperty("id").GetInt32(), u.GetProperty("name").GetString() ?? ""));
+            }
+            var total = doc.RootElement.TryGetProperty("total_count", out var t) ? t.GetInt32() : all.Count;
+            if (all.Count >= total || memberships.Count == 0) break;
+        }
+        return all;
+    }
 
 
+
+    // -------------------
+    // Helpers
+    // -------------------
+    private static int GetInt(JsonElement e, string name) => e.GetProperty(name).GetInt32();
+    private static string? TryGetString(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) ? v.GetString() : null;
+
+    private static string? ExtractGitLabUrlFromProject(JsonElement project, string cfName)
+    {
+        if (!project.TryGetProperty("custom_fields", out var cfs) || cfs.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var cf in cfs.EnumerateArray())
+        {
+            var name = TryGetString(cf, "name");
+            if (string.Equals(name, cfName, StringComparison.OrdinalIgnoreCase))
+            {
+                var value = TryGetString(cf, "value");
+                return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+            }
+        }
+
+        return null;
+    }
 
     private static string? PathFromUrl(string url)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return null;
         var path = uri.AbsolutePath.Trim('/');
-        // GitLab can have trailing ".git" on URLs; strip it for API lookups
         if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
             path = path[..^4];
         return path;
