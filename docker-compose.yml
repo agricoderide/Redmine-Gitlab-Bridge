@@ -114,11 +114,13 @@ services:
 
       # Redmine (service-to-service URL inside the compose network)
       Redmine__BaseUrl: http://redmine:3000
+      Redmine__PublicUrl: ${REDMINE_PUBLIC_URL}
       Redmine__ApiKey: ${REDMINE_API_KEY}
       Redmine__GitlabCustomField: ${REDMINE_GITLAB_CF:-GitLab URL}
 
       # GitLab (service-to-service URL inside the compose network)
       GitLab__BaseUrl: http://gitlab
+      GitlLab__PublicUrl: ${GITLAB_PUBLIC_URL}
       GitLab__PrivateToken: ${GITLAB_TOKEN}
 
       # Polling

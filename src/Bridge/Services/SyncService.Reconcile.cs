@@ -41,7 +41,7 @@ public sealed partial class SyncService
         }
 
         // --- Normalize “Source:” links so repo-URL changes are detected and patched
-        var redmineUrl = $"{_redmine._opt.BaseUrl.TrimEnd('/')}/issues/{m.RedmineIssueId}";
+        var redmineUrl = $"{_redmine._opt.PublicUrl.TrimEnd('/')}/issues/{m.RedmineIssueId}";
         var gitlabUrl = $"{p.GitLabProject!.Url}/-/issues/{m.GitLabIssueId}";
 
         gl = gl with { Description = DescriptionUtils.AddOrUpdateSourceLink(gl.Description, redmineUrl) };

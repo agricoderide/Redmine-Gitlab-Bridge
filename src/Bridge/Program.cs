@@ -1,9 +1,4 @@
-// Bridge application startup: config binding, DI registrations,
-// HTTP resilience, EF Core, background workers, health, Swagger,
-// reverse-proxy headers, and minimal API endpoints.
 using System.Net;
-using System.Text.Json;
-using Bridge.Contracts;
 using Bridge.Data;
 using Bridge.Infrastructure.Options;
 using Bridge.Services;

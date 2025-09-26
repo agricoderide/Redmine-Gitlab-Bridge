@@ -200,7 +200,7 @@ public sealed partial class SyncService
                 .FirstOrDefaultAsync(ct)
             : null;
 
-        var redmineUrl = $"{_redmine._opt.BaseUrl}/issues/{rmId}";
+        var redmineUrl = $"{_redmine._opt.PublicUrl}/issues/{rmId}";
 
         var glState = string.Equals(rmi.Status, "Closed", StringComparison.OrdinalIgnoreCase)
             ? "closed"

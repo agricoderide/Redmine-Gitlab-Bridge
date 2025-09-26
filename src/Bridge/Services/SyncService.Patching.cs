@@ -31,7 +31,7 @@ public sealed partial class SyncService
     private async Task PatchGitLabFromRedmineAsync(ProjectSync p, IssueMapping m, IssueBasic rm, CancellationToken ct)
     {
 
-        var redmineUrl = $"{_redmine._opt.BaseUrl.TrimEnd('/')}/issues/{m.RedmineIssueId}";
+        var redmineUrl = $"{_redmine._opt.PublicUrl.TrimEnd('/')}/issues/{m.RedmineIssueId}";
 
         var glTarget = new IssueBasic(
             RedmineId: rm.RedmineId,

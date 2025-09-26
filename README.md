@@ -180,3 +180,11 @@ docker compose --profile core --profile app --profile bridge up -d
 
 when you make changes to c#
 COMPOSE_PROFILES=core,app,bridge docker compose up -d --build bridge
+
+
+las4090@las4090-Z790-UD-AX:~/Documents/Projects/Redmine-Gitlab-Bridge$ docker compose --profile core --profile app --profile bridge config --services
+
+
+las4090@las4090-Z790-UD-AX:~/Documents/Projects/Redmine-Gitlab-Bridge$ docker compose --profile core --profile app --profile bridge ps
+
+las4090@las4090-Z790-UD-AX:~/Documents/Projects/Redmine-Gitlab-Bridge$ docker compose --profile core --profile app --profile bridge stop bridge

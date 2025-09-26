@@ -34,6 +34,7 @@ namespace Bridge.Infrastructure.Options
         public const string SectionName = "Redmine";
         public string BaseUrl { get; set; } = "";
         public string ApiKey { get; set; } = "";
+        public string PublicUrl { get; set; } = "";
         public string GitlabCustomField { get; set; } = "Gitlab Repo";
 
     }
@@ -53,5 +54,6 @@ namespace Bridge.Infrastructure.Options
         public string BaseUrl { get; set; } = "";
         public string PrivateToken { get; set; } = "";
         public string WebhookSecret { get; set; } = "";
+        public string PublicUrl { get; set; } = "";
     }
 }
