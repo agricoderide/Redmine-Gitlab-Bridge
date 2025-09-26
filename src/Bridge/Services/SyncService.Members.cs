@@ -14,7 +14,7 @@ public sealed partial class SyncService
                 return;
 
             var gitlabUsers = await _gitlab.GetGitLabProjectMembersAsync((int)p.GitLabProject.GitLabProjectId);
-            var redmineUsers = await _redmine.GetRedmineMembersAsync(p.Id);
+            var redmineUsers = await _redmine.GetRedmineMembersAsync(p.RedmineProjectId);
 
             var seen = new HashSet<(int rmId, int glId)>();
             var toAdd = new List<User>();

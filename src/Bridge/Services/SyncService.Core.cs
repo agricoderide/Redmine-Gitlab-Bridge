@@ -24,10 +24,9 @@ public sealed partial class SyncService
         await _db.Database.MigrateAsync(ct);
         await _redmine.SyncGlobalTrackersAsync(ct);
         await _redmine.SyncGlobalStatusesAsync(ct);
-
         await GetRedmine_GitlabProjects(ct);
 
-        var projects = await _db.Projects.AsNoTracking().Include(p => p.GitLabProject).ToListAsync(ct);
+        List<ProjectSync> projects = await _db.Projects.AsNoTracking().Include(p => p.GitLabProject).ToListAsync(ct);
         foreach (var p in projects)
         {
             try

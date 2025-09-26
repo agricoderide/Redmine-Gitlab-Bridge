@@ -109,78 +109,88 @@ public sealed partial class SyncService
 
     private async Task CreateRedmineFromGitLabAsync(ProjectSync p, IssueBasic gli, HashSet<int> mappedRm, HashSet<long> mappedGl, CancellationToken ct)
     {
-        if (gli.GitLabIid is not long giid || mappedGl.Contains(giid))
-            return;
-
-        var trackerName = gli.Labels?.FirstOrDefault() ?? "Feature";
-        int? trackerId = null;
-
-        if (trackerName != null)
+        try
         {
-            trackerId = await _db.TrackersRedmine
-                .Where(t => t.Name.ToLower() == trackerName.ToLower())
-                .Select(t => (int?)t.RedmineTrackerId)
-                .FirstOrDefaultAsync(ct);
+            if (gli.GitLabIid is not long giid || mappedGl.Contains(giid))
+                return;
+
+            var trackerName = gli.Labels?.FirstOrDefault() ?? "Feature";
+            int? trackerId = null;
+
+            if (trackerName != null)
+            {
+                trackerId = await _db.TrackersRedmine
+                    .Where(t => t.Name.ToLower() == trackerName.ToLower())
+                    .Select(t => (int?)t.RedmineTrackerId)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            var rmAssigneeId = gli.AssigneeId.HasValue
+                ? await _db.Users
+                    .Where(u => u.GitLabUserId == gli.AssigneeId.Value)
+                    .Select(u => (int?)u.RedmineUserId)
+                    .FirstOrDefaultAsync(ct)
+                : null;
+
+            if (p == null || p.GitLabProject == null) return;
+            var gitlabUrl = $"{p.GitLabProject.Url}/-/issues/{gli.GitLabIid}";
+
+            int? statusId = null;
+            if (string.Equals(gli.Status, "closed", StringComparison.OrdinalIgnoreCase))
+            {
+                statusId = await _db.StatusesRedmine
+                    .Where(s => s.Name == "Closed")
+                    .Select(s => (int?)s.RedmineStatusId)
+                    .FirstOrDefaultAsync(ct);
+            }
+            else
+            {
+                statusId = await _db.StatusesRedmine
+                    .Where(s => s.Name == "New")
+                    .Select(s => (int?)s.RedmineStatusId)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            var todayLocal = DateTime.Now; // or inject IClock
+            DateOnly? safeDueDate = SanitizeDueForCreate(gli.DueDate, DateTime.Now);
+
+            DateTime? dueParam = safeDueDate?.ToDateTime(TimeOnly.MinValue);
+            var (rok, newRmId, rmsg) = await _redmine.CreateIssueAsync(
+                p.RedmineIdentifier,
+                gli.Title,
+                gli.Description,
+                trackerId,
+                rmAssigneeId,
+                gitlabUrl,
+                dueParam,    // only passes when valid
+                statusId,
+                ct
+            );
+            if (!rok)
+            {
+                _log.LogWarning("Redmine create issue failed for project {RmKey}: {Msg}", p.RedmineIdentifier, rmsg);
+                return;
+            }
+
+            var mapping = new IssueMapping
+            {
+                ProjectSyncId = p.Id,
+                RedmineIssueId = newRmId,
+                GitLabIssueId = giid,
+            };
+            _db.IssueMappings.Add(mapping);
+
+            // To compute the hashvalue
+            var glCurrent = await _gitlab.TryGetSingleIssueBasicAsync(p.GitLabProject!.GitLabProjectId!.Value, giid, ct);
+            mapping.CanonicalSnapshot = glCurrent;
+
+            mappedGl.Add(giid);
+            mappedRm.Add(newRmId);
         }
-
-        var rmAssigneeId = gli.AssigneeId.HasValue
-            ? await _db.Users
-                .Where(u => u.GitLabUserId == gli.AssigneeId.Value)
-                .Select(u => (int?)u.RedmineUserId)
-                .FirstOrDefaultAsync(ct)
-            : null;
-
-        if (p == null || p.GitLabProject == null) return;
-        var gitlabUrl = $"{p.GitLabProject.Url}/-/issues/{gli.GitLabIid}";
-
-        int? statusId = null;
-        if (string.Equals(gli.Status, "closed", StringComparison.OrdinalIgnoreCase))
+        catch (Exception ex)
         {
-            statusId = await _db.StatusesRedmine
-                .Where(s => s.Name == "Closed")
-                .Select(s => (int?)s.RedmineStatusId)
-                .FirstOrDefaultAsync(ct);
+            _log.LogWarning("Exception: " + ex);
         }
-        else
-        {
-            statusId = await _db.StatusesRedmine
-                .Where(s => s.Name == "New")
-                .Select(s => (int?)s.RedmineStatusId)
-                .FirstOrDefaultAsync(ct);
-        }
-
-        var (rok, newRmId, rmsg) = await _redmine.CreateIssueAsync(
-            p.RedmineIdentifier,
-            gli.Title,
-            gli.Description,
-            trackerId,
-            rmAssigneeId,
-            gitlabUrl,
-            gli.DueDate,
-            statusId,
-            ct
-        );
-
-        if (!rok)
-        {
-            _log.LogWarning("Redmine create issue failed for project {RmKey}: {Msg}", p.RedmineIdentifier, rmsg);
-            return;
-        }
-
-        var mapping = new IssueMapping
-        {
-            ProjectSyncId = p.Id,
-            RedmineIssueId = newRmId,
-            GitLabIssueId = giid,
-        };
-        _db.IssueMappings.Add(mapping);
-
-        // To compute the hashvalue
-        var glCurrent = await _gitlab.TryGetSingleIssueBasicAsync(p.GitLabProject!.GitLabProjectId!.Value, giid, ct);
-        mapping.CanonicalSnapshot = glCurrent;
-
-        mappedGl.Add(giid);
-        mappedRm.Add(newRmId);
     }
 
 

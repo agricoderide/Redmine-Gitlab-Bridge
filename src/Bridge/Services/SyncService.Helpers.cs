@@ -53,6 +53,16 @@ public sealed partial class SyncService
         return Convert.ToHexString(hash);
     }
 
+    private static DateOnly? SanitizeDueForCreate(DateTime? glDueUtc, DateTime todayLocal)
+    {
+        if (glDueUtc is null) return null;
+        var dueLocalDate = DateOnly.FromDateTime(glDueUtc.Value.ToLocalTime());
+        var today = DateOnly.FromDateTime(todayLocal);
+        // Redmine requires due > start; start defaults to today,
+        // so require due >= today.AddDays(1)
+        return dueLocalDate > today ? dueLocalDate : null;
+    }
+
     private static IReadOnlyList<string> NormalizeLabels(List<string>? labels) =>
         (labels ?? new()).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
 
